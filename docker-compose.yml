@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  webrtc-build:
+    build: .
+    volumes:
+      - ./:/workspace
+    working_dir: /workspace
+    command: bash -c "cargo build --release"

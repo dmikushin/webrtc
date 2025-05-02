@@ -1,3 +1,13 @@
+## Docker Build
+
+To build the project using Docker (with Rust 1.80):
+
+```sh
+docker-compose up --build
+```
+
+This will build the project in a containerized environment using the provided Dockerfile.
+
 <h1 align="center">
  <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc/master/doc/webrtc.rs.png" alt="WebRTC.rs"></a>
  <br>
