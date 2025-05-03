@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include "webrtc_c_api.h"
 
 // Stub for YUV conversion (replace with real implementation as needed)
 void rgb_to_yuv420p(const unsigned char* rgb, int width, int height, unsigned char* yuv) {
@@ -22,6 +23,22 @@ void rgb_to_yuv420p(const unsigned char* rgb, int width, int height, unsigned ch
     // For now, just zero the buffer.
     size_t yuv_size = width * height * 3 / 2;
     std::memset(yuv, 0, yuv_size);
+}
+
+struct WebRTCContext {
+    webrtc_session_t* session = nullptr;
+};
+
+// Example input callback (stub)
+void webrtc_input_callback(const void* data, int len, void* user_data) {
+    // Handle input events from the client (mouse, keyboard, etc.)
+    std::cout << "[WebRTC] Received input event of length " << len << std::endl;
+}
+
+void render_webrtc(WebRTCContext* ctx, int width, int height, const unsigned char* yuv_pixels) {
+    if (ctx && ctx->session) {
+        webrtc_session_send_frame(ctx->session, width, height, yuv_pixels);
+    }
 }
 
 void render(int width, int height, const unsigned char* yuv_pixels, bool native_output) {
@@ -49,6 +66,12 @@ int main(int argc, char* argv[])
         }
     }
     if (!native_output && !webrtc_output) native_output = true; // Default
+
+    WebRTCContext webrtc_ctx;
+    if (webrtc_output) {
+        // Create WebRTC session (config can be null or a stub for now)
+        webrtc_ctx.session = webrtc_session_create(nullptr, webrtc_input_callback, nullptr);
+    }
 
     // Create a cube
     vtkNew<vtkCubeSource> cubeSource;
@@ -80,7 +103,7 @@ int main(int argc, char* argv[])
     std::condition_variable dirty_cv;
     std::thread webrtc_thread;
     if (webrtc_output) {
-        webrtc_thread = std::thread([=, &running, &scene_dirty, &dirty_mutex, &dirty_cv]() {
+        webrtc_thread = std::thread([=, &running, &scene_dirty, &dirty_mutex, &dirty_cv, &webrtc_ctx]() {
             // Create a separate VTK pipeline for the webrtc thread
             vtkNew<vtkCubeSource> cubeSourceW;
             cubeSourceW->SetXLength(1.0);
@@ -119,7 +142,7 @@ int main(int argc, char* argv[])
                 exporter->Export(rgb.data());
                 std::vector<unsigned char> yuv(num_pixels * 3 / 2);
                 rgb_to_yuv420p(rgb.data(), dims[0], dims[1], yuv.data());
-                render(dims[0], dims[1], yuv.data(), false);
+                render_webrtc(&webrtc_ctx, dims[0], dims[1], yuv.data());
                 std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30 FPS
             }
         });
@@ -165,5 +188,10 @@ int main(int argc, char* argv[])
         dirty_cv.notify_one();
         webrtc_thread.join();
     }
+
+    if (webrtc_output && webrtc_ctx.session) {
+        webrtc_session_destroy(webrtc_ctx.session);
+    }
+
     return 0;
 }

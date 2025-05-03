@@ -42,3 +42,38 @@ pub(crate) const RECEIVE_MTU: usize = 1460;
 pub(crate) const SDP_ATTRIBUTE_RID: &str = "rid";
 pub(crate) const SDP_ATTRIBUTE_SIMULCAST: &str = "simulcast";
 pub(crate) const GENERATED_CERTIFICATE_ORIGIN: &str = "WebRTC";
+
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_void};
+
+#[repr(C)]
+pub struct webrtc_session_t {
+    _private: [u8; 0],
+}
+
+pub type webrtc_input_callback_t = Option<extern "C" fn(data: *const c_void, len: c_int, user_data: *mut c_void)>;
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_create(
+    config_json: *const c_char,
+    cb: webrtc_input_callback_t,
+    user_data: *mut c_void,
+) -> *mut webrtc_session_t {
+    // TODO: Implement real session creation
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_send_frame(
+    session: *mut webrtc_session_t,
+    width: c_int,
+    height: c_int,
+    yuv: *const u8,
+) {
+    // TODO: Implement real frame sending
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_destroy(session: *mut webrtc_session_t) {
+    // TODO: Implement real destruction
+}
