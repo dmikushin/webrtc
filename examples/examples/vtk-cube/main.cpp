@@ -16,6 +16,10 @@
 #include <chrono>
 #include <condition_variable>
 #include "webrtc_c_api.h"
+#include <uWebSockets/App.h>
+#include <uWebSockets/WebSocket.h>
+#include <nlohmann/json.hpp> // For JSON parsing (add to project if not present)
+#include <ixwebsocket/IXWebSocket.h>
 
 // Stub for YUV conversion (replace with real implementation as needed)
 void rgb_to_yuv420p(const unsigned char* rgb, int width, int height, unsigned char* yuv) {
@@ -51,11 +55,40 @@ void render(int width, int height, const unsigned char* yuv_pixels, bool native_
     }
 }
 
+// Signaling client logic using ixwebsocket
+class SignalingClient {
+public:
+    SignalingClient(const std::string& url, std::function<void(const std::string&)> on_message)
+        : url_(url), on_message_(on_message) {}
+
+    void start() {
+        ws_.setUrl(url_);
+        ws_.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+            if (msg->type == ix::WebSocketMessageType::Message && on_message_) {
+                on_message_(msg->str);
+            }
+        });
+        ws_.start();
+    }
+    void stop() {
+        ws_.stop();
+    }
+    void send(const std::string& msg) {
+        ws_.send(msg);
+    }
+private:
+    std::string url_;
+    std::function<void(const std::string&)> on_message_;
+    ix::WebSocket ws_;
+};
+
 int main(int argc, char* argv[])
 {
     bool native_output = false;
     bool webrtc_output = false;
+    bool verbose = false;
     int width = 640, height = 480;
+    std::string signalling_url = "ws://localhost:8080";
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--native") native_output = true;
@@ -64,13 +97,47 @@ int main(int argc, char* argv[])
             width = std::stoi(argv[++i]);
             height = std::stoi(argv[++i]);
         }
+        if (arg == "--signalling" && i + 1 < argc) {
+            signalling_url = argv[++i];
+        }
+        if (arg == "--verbose") verbose = true;
     }
     if (!native_output && !webrtc_output) native_output = true; // Default
 
     WebRTCContext webrtc_ctx;
+    std::unique_ptr<SignalingClient> signalling_client;
     if (webrtc_output) {
         // Create WebRTC session (config can be null or a stub for now)
         webrtc_ctx.session = webrtc_session_create(nullptr, webrtc_input_callback, nullptr);
+        // Set up signaling client
+        signalling_client = std::make_unique<SignalingClient>(signalling_url, [&](const std::string& msg) {
+            if (verbose) std::cout << "[Signaling] Received: " << msg << std::endl;
+            // Parse JSON and dispatch to WebRTC session
+            try {
+                auto j = nlohmann::json::parse(msg);
+                if (j["type"] == "offer" || j["type"] == "answer") {
+                    webrtc_session_set_remote_description(webrtc_ctx.session, msg.c_str());
+                } else if (j["type"] == "candidate") {
+                    webrtc_session_add_ice_candidate(webrtc_ctx.session, msg.c_str());
+                }
+            } catch (...) {
+                std::cerr << "[Signaling] Failed to parse message: " << msg << std::endl;
+            }
+        });
+        // Register callback to send local signaling messages to the browser
+        webrtc_session_set_signal_callback(
+            webrtc_ctx.session,
+            [](const char* msg, void* user_data) {
+                if (user_data && msg) {
+                    static_cast<SignalingClient*>(user_data)->send(msg);
+                    // Print outgoing message if verbose
+                    std::cout << "[Signaling] Sent: " << msg << std::endl;
+                }
+            },
+            signalling_client.get()
+        );
+        if (verbose) std::cout << "[Signaling] Connecting to " << signalling_url << std::endl;
+        signalling_client->start();
     }
 
     // Create a cube
@@ -187,6 +254,10 @@ int main(int argc, char* argv[])
         running = false;
         dirty_cv.notify_one();
         webrtc_thread.join();
+    }
+
+    if (webrtc_output && signalling_client) {
+        signalling_client->stop();
     }
 
     if (webrtc_output && webrtc_ctx.session) {

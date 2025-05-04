@@ -52,6 +52,7 @@ pub struct webrtc_session_t {
 }
 
 pub type webrtc_input_callback_t = Option<extern "C" fn(data: *const c_void, len: c_int, user_data: *mut c_void)>;
+pub type webrtc_signal_callback_t = Option<extern "C" fn(msg: *const c_char, user_data: *mut c_void)>;
 
 #[no_mangle]
 pub extern "C" fn webrtc_session_create(
@@ -71,6 +72,31 @@ pub extern "C" fn webrtc_session_send_frame(
     yuv: *const u8,
 ) {
     // TODO: Implement real frame sending
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_set_signal_callback(
+    _session: *mut webrtc_session_t,
+    _cb: webrtc_signal_callback_t,
+    _user_data: *mut c_void,
+) {
+    // TODO: Store callback and call it when local signaling messages are generated
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_set_remote_description(
+    _session: *mut webrtc_session_t,
+    _sdp_json: *const c_char,
+) {
+    // TODO: Pass remote SDP to the session
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_add_ice_candidate(
+    _session: *mut webrtc_session_t,
+    _candidate_json: *const c_char,
+) {
+    // TODO: Pass ICE candidate to the session
 }
 
 #[no_mangle]
