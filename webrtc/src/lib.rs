@@ -43,25 +43,153 @@ pub(crate) const SDP_ATTRIBUTE_RID: &str = "rid";
 pub(crate) const SDP_ATTRIBUTE_SIMULCAST: &str = "simulcast";
 pub(crate) const GENERATED_CERTIFICATE_ORIGIN: &str = "WebRTC";
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-
-#[repr(C)]
-pub struct webrtc_session_t {
-    _private: [u8; 0],
-}
+use std::sync::{Arc, Mutex};
+use crate::api::media_engine::MediaEngine;
+use crate::api::APIBuilder;
+use crate::peer_connection::RTCPeerConnection;
+use crate::peer_connection::configuration::RTCConfiguration;
+use crate::peer_connection::sdp::session_description::RTCSessionDescription;
+use crate::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use crate::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use crate::track::track_local::TrackLocal;
+use crate::media::Sample;
+use crate::ice_transport::ice_candidate::RTCIceCandidateInit;
+use tokio::runtime::Runtime;
+use vpx_encode::{Encoder, Config};
+use vpx_encode::Codec;
 
 pub type webrtc_input_callback_t = Option<extern "C" fn(data: *const c_void, len: c_int, user_data: *mut c_void)>;
 pub type webrtc_signal_callback_t = Option<extern "C" fn(msg: *const c_char, user_data: *mut c_void)>;
 
+type SignalCallback = Option<extern "C" fn(msg: *const c_char, user_data: *mut c_void)>;
+
+struct WebrtcSession {
+    pc: Arc<RTCPeerConnection>,
+    video_track: Arc<TrackLocalStaticSample>,
+    signal_cb: SignalCallback,
+    signal_user_data: *mut c_void,
+    rt: Runtime,
+}
+
+#[repr(C)]
+pub struct webrtc_session_t {
+    inner: Mutex<Option<WebrtcSession>>,
+}
+
+unsafe impl Send for webrtc_session_t {}
+unsafe impl Sync for webrtc_session_t {}
+
 #[no_mangle]
 pub extern "C" fn webrtc_session_create(
-    config_json: *const c_char,
-    cb: webrtc_input_callback_t,
-    user_data: *mut c_void,
+    _config_json: *const c_char,
+    _input_cb: webrtc_input_callback_t,
+    _user_data: *mut c_void,
 ) -> *mut webrtc_session_t {
-    // TODO: Implement real session creation
-    std::ptr::null_mut()
+    let mut m = MediaEngine::default();
+    m.register_default_codecs().unwrap();
+    let api = APIBuilder::new().with_media_engine(m).build();
+    let rt = Runtime::new().unwrap();
+    let (pc, video_track) = rt.block_on(async {
+        let pc = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap());
+        let video_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: "video/VP8".to_owned(),
+                ..Default::default()
+            },
+            "video".to_owned(),
+            "webrtc-rs".to_owned(),
+        ));
+        pc.add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>).await.unwrap();
+        (pc, video_track)
+    });
+    let session = WebrtcSession {
+        pc,
+        video_track,
+        signal_cb: None,
+        signal_user_data: std::ptr::null_mut(),
+        rt,
+    };
+    Box::into_raw(Box::new(webrtc_session_t {
+        inner: Mutex::new(Some(session)),
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_set_signal_callback(
+    session: *mut webrtc_session_t,
+    cb: webrtc_signal_callback_t,
+    user_data: *mut c_void,
+) {
+    let session = unsafe { &mut *session };
+    if let Some(ref mut s) = *session.inner.lock().unwrap() {
+        s.signal_cb = cb;
+        s.signal_user_data = user_data;
+        let pc = Arc::clone(&s.pc);
+        // Copy user_data to a usize for Send safety
+        let user_data_val = user_data as usize;
+        let cb = cb;
+        s.rt.spawn(async move {
+            pc.on_ice_candidate(Box::new(move |cand| {
+                let cb = cb;
+                let user_data_val = user_data_val;
+                Box::pin(async move {
+                    if let Some(c) = cand {
+                        let json = serde_json::to_string(&c.to_json().unwrap()).unwrap();
+                        if let Some(cb) = cb {
+                            let cstr = CString::new(json).unwrap();
+                            // Cast back to pointer
+                            cb(cstr.as_ptr(), user_data_val as *mut c_void);
+                        }
+                    }
+                })
+            }));
+        });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_set_remote_description(
+    session: *mut webrtc_session_t,
+    sdp_json: *const c_char,
+) {
+    let session = unsafe { &mut *session };
+    let sdp_json = unsafe { CStr::from_ptr(sdp_json).to_string_lossy().to_string() };
+    if let Some(ref mut s) = *session.inner.lock().unwrap() {
+        let pc = Arc::clone(&s.pc);
+        let cb = s.signal_cb;
+        let user_data_val = s.signal_user_data as usize;
+        let rt = &s.rt;
+        rt.spawn(async move {
+            let sdp: RTCSessionDescription = serde_json::from_str(&sdp_json).unwrap();
+            pc.set_remote_description(sdp).await.unwrap();
+            let answer = pc.create_answer(None).await.unwrap();
+            pc.set_local_description(answer.clone()).await.unwrap();
+            let answer_json = serde_json::to_string(&answer).unwrap();
+            if let Some(cb) = cb {
+                let cstr = CString::new(answer_json).unwrap();
+                cb(cstr.as_ptr(), user_data_val as *mut c_void);
+            }
+        });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_add_ice_candidate(
+    session: *mut webrtc_session_t,
+    candidate_json: *const c_char,
+) {
+    let session = unsafe { &mut *session };
+    let candidate_json = unsafe { CStr::from_ptr(candidate_json).to_string_lossy().to_string() };
+    if let Some(ref mut s) = *session.inner.lock().unwrap() {
+        let pc = Arc::clone(&s.pc);
+        let rt = &s.rt;
+        rt.spawn(async move {
+            let cand: RTCIceCandidateInit = serde_json::from_str(&candidate_json).unwrap();
+            pc.add_ice_candidate(cand).await.unwrap();
+        });
+    }
 }
 
 #[no_mangle]
@@ -71,35 +199,39 @@ pub extern "C" fn webrtc_session_send_frame(
     height: c_int,
     yuv: *const u8,
 ) {
-    // TODO: Implement real frame sending
-}
-
-#[no_mangle]
-pub extern "C" fn webrtc_session_set_signal_callback(
-    _session: *mut webrtc_session_t,
-    _cb: webrtc_signal_callback_t,
-    _user_data: *mut c_void,
-) {
-    // TODO: Store callback and call it when local signaling messages are generated
-}
-
-#[no_mangle]
-pub extern "C" fn webrtc_session_set_remote_description(
-    _session: *mut webrtc_session_t,
-    _sdp_json: *const c_char,
-) {
-    // TODO: Pass remote SDP to the session
-}
-
-#[no_mangle]
-pub extern "C" fn webrtc_session_add_ice_candidate(
-    _session: *mut webrtc_session_t,
-    _candidate_json: *const c_char,
-) {
-    // TODO: Pass ICE candidate to the session
+    let session = unsafe { &mut *session };
+    if let Some(ref mut s) = *session.inner.lock().unwrap() {
+        let w = width as u32;
+        let h = height as u32;
+        let yuv_slice = unsafe { std::slice::from_raw_parts(yuv, (w * h * 3 / 2) as usize) };
+        let mut encoder = Encoder::new(Config {
+            width: w,
+            height: h,
+            timebase: [1, 30],
+            bitrate: 1_000_000,
+            codec: Codec::VP9,
+        }).expect("Failed to create VP9 encoder");
+        let pts = 0; // TODO: use real timestamp
+        let packets = encoder.encode(pts, yuv_slice).expect("VP9 encode failed");
+        for pkt in packets {
+            let data = pkt.data;
+            let duration = std::time::Duration::from_millis(33); // ~30 FPS
+            let sample = Sample {
+                data: data.into(),
+                duration,
+                ..Default::default()
+            };
+            let video_track = Arc::clone(&s.video_track);
+            s.rt.spawn(async move {
+                let _ = video_track.write_sample(&sample).await;
+            });
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn webrtc_session_destroy(session: *mut webrtc_session_t) {
-    // TODO: Implement real destruction
+    if !session.is_null() {
+        unsafe { Box::from_raw(session) };
+    }
 }
