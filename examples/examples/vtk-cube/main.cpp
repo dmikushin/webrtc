@@ -39,8 +39,16 @@ void webrtc_input_callback(const void* data, int len, void* user_data) {
     std::cout << "[WebRTC] Received input event of length " << len << std::endl;
 }
 
-void render_webrtc(WebRTCContext* ctx, int width, int height, const unsigned char* yuv_pixels) {
+void render_webrtc(WebRTCContext* ctx, int width, int height, const unsigned char* yuv_pixels, bool verbose, size_t frame_idx = 0) {
     if (ctx && ctx->session) {
+        if (verbose) {
+            auto now = std::chrono::system_clock::now();
+            std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+            std::cout << "[WebRTC][Streaming] Frame " << frame_idx
+                      << ", size: " << width << "x" << height
+                      << ", timestamp: " << std::put_time(std::localtime(&now_c), "%F %T")
+                      << std::endl;
+        }
         webrtc_session_send_frame(ctx->session, width, height, yuv_pixels);
     }
 }
@@ -109,6 +117,16 @@ int main(int argc, char* argv[])
     if (webrtc_output) {
         // Create WebRTC session (config can be null or a stub for now)
         webrtc_ctx.session = webrtc_session_create(nullptr, webrtc_input_callback, nullptr);
+        // Print diagnostics (ICE credentials, selected candidate, etc.)
+        if (verbose && webrtc_ctx.session) {
+            char* diag_json = webrtc_session_get_diagnostics(webrtc_ctx.session);
+            if (diag_json) {
+                std::cout << "[WebRTC][Diagnostics] " << diag_json << std::endl;
+                free(diag_json);
+            } else {
+                std::cout << "[WebRTC][Diagnostics] (unavailable)" << std::endl;
+            }
+        }
         // Set up signaling client
         signalling_client = std::make_unique<SignalingClient>(signalling_url, [&](const std::string& msg) {
             if (verbose) std::cout << "[Signaling] Received: " << msg << std::endl;
@@ -187,6 +205,7 @@ int main(int argc, char* argv[])
             offscreenRenderWindow->OffScreenRenderingOn();
             rendererW->AddActor(actorW);
             rendererW->SetBackground(0.1, 0.2, 0.4);
+            size_t frame_idx = 0;
             while (running) {
                 std::unique_lock<std::mutex> lock(dirty_mutex);
                 dirty_cv.wait(lock, [&]() { return scene_dirty || !running; });
@@ -209,7 +228,7 @@ int main(int argc, char* argv[])
                 exporter->Export(rgb.data());
                 std::vector<unsigned char> yuv(num_pixels * 3 / 2);
                 rgb_to_yuv420p(rgb.data(), dims[0], dims[1], yuv.data());
-                render_webrtc(&webrtc_ctx, dims[0], dims[1], yuv.data());
+                render_webrtc(&webrtc_ctx, dims[0], dims[1], yuv.data(), verbose, frame_idx++);
                 std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30 FPS
             }
         });

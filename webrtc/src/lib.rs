@@ -44,7 +44,7 @@ pub(crate) const SDP_ATTRIBUTE_SIMULCAST: &str = "simulcast";
 pub(crate) const GENERATED_CERTIFICATE_ORIGIN: &str = "WebRTC";
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_int, c_void};
 use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use log::{debug, error, info, warn};
@@ -62,6 +62,7 @@ use crate::ice_transport::ice_candidate::RTCIceCandidateInit;
 use crate::data_channel::data_channel_init::RTCDataChannelInit;
 use tokio::runtime::Runtime;
 use vpx_encode::{Encoder, Config, VideoCodecId};
+use std::os::raw::c_char;
 // Remove incorrect Codec import
 
 // Define the callback types with proper Rust naming conventions
@@ -583,4 +584,58 @@ pub extern "C" fn webrtc_session_destroy(session: *mut webrtc_session_t) {
     *guard = None;
     
     // Session will be dropped when guard is dropped
+}
+
+#[no_mangle]
+pub extern "C" fn webrtc_session_get_diagnostics(session: *mut webrtc_session_t) -> *mut c_char {
+    use std::ffi::CString;
+    use std::ptr;
+    use serde_json::json;
+
+    if session.is_null() {
+        return ptr::null_mut();
+    }
+    let session = unsafe { &mut *session };
+    let guard = match session.inner.lock() {
+        Ok(guard) => guard,
+        Err(_) => return ptr::null_mut(),
+    };
+    if let Some(ref s) = *guard {
+        let pc = Arc::clone(&s.pc);
+        let rt = &s.rt;
+        // Block on async to get ICE info
+        let result: Result<serde_json::Value, ()> = rt.block_on(async move {
+            let mut diagnostics = json!({});
+            // Local ICE credentials
+            if let Some(params) = pc.get_local_ice_parameters().await {
+                diagnostics["local_ice_ufrag"] = json!(params.username_fragment);
+                diagnostics["local_ice_pwd"] = json!(params.password);
+            }
+            // Selected candidate pair (if available)
+            if let Some(pair) = pc.sctp().transport().ice_transport().get_selected_candidate_pair().await {
+                let local = pair.local_candidate();
+                let remote = pair.remote_candidate();
+                diagnostics["selected_local_candidate"] = json!({
+                    "address": local.address,
+                    "port": local.port,
+                    "type": format!("{:?}", local.typ),
+                });
+                diagnostics["selected_remote_candidate"] = json!({
+                    "address": remote.address,
+                    "port": remote.port,
+                    "type": format!("{:?}", remote.typ),
+                });
+            }
+            Ok(diagnostics)
+        });
+        drop(guard);
+        if let Ok(json_val) = result {
+            if let Ok(json_str) = serde_json::to_string(&json_val) {
+                if let Ok(cstr) = CString::new(json_str) {
+                    return cstr.into_raw();
+                }
+            }
+        }
+    }
+    ptr::null_mut()
 }

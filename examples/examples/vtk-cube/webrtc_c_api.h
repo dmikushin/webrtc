@@ -19,6 +19,10 @@ void webrtc_session_set_signal_callback(webrtc_session_t* session, webrtc_signal
 void webrtc_session_set_remote_description(webrtc_session_t* session, const char* sdp_json);
 void webrtc_session_add_ice_candidate(webrtc_session_t* session, const char* candidate_json);
 
+// Returns a JSON string with local ICE credentials and selected remote candidate info.
+// The returned string must be freed with free().
+char* webrtc_session_get_diagnostics(webrtc_session_t* session);
+
 #ifdef __cplusplus
 }
 #endif

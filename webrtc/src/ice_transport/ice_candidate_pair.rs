@@ -37,4 +37,14 @@ impl RTCIceCandidatePair {
             remote,
         }
     }
+
+    /// Returns a reference to the local candidate
+    pub fn local_candidate(&self) -> &RTCIceCandidate {
+        &self.local
+    }
+
+    /// Returns a reference to the remote candidate
+    pub fn remote_candidate(&self) -> &RTCIceCandidate {
+        &self.remote
+    }
 }

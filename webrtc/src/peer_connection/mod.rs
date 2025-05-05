@@ -2129,4 +2129,9 @@ impl RTCPeerConnection {
     pub async fn add_transceiver(&self, t: Arc<RTCRtpTransceiver>) {
         self.internal.add_rtp_transceiver(t).await
     }
+
+    /// Returns the local ICE parameters (ufrag, pwd, etc) for diagnostics
+    pub async fn get_local_ice_parameters(&self) -> Option<crate::ice_transport::ice_parameters::RTCIceParameters> {
+        self.internal.ice_gatherer.get_local_parameters().await.ok()
+    }
 }
