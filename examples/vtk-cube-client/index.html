@@ -13,33 +13,46 @@
     // --- Config ---
     const SIGNALING_URL = "ws://localhost:8080"; // Change to your signaling server address
 
+    // --- Verbose logging flag ---
+    const VERBOSE_LOG = true; // Set to false to disable verbose logging
+
+    function vlog(...args) {
+      if (VERBOSE_LOG) console.log('[VTK-CLIENT]', ...args);
+    }
+
     // --- WebRTC setup ---
     const pc = new RTCPeerConnection();
     let dataChannel = null;
     const video = document.getElementById('remoteVideo');
     pc.ontrack = (event) => {
+      vlog('Received remote track:', event);
       video.srcObject = event.streams[0];
     };
 
     // --- Data channel for input events ---
     pc.ondatachannel = (event) => {
+      vlog('Received data channel:', event.channel.label);
       dataChannel = event.channel;
       setupInputEvents();
+      dataChannel.onopen = () => vlog('Data channel opened');
+      dataChannel.onclose = () => vlog('Data channel closed');
+      dataChannel.onerror = (e) => vlog('Data channel error:', e);
+      dataChannel.onmessage = (e) => vlog('Data channel message:', e.data);
     };
 
     function setupInputEvents() {
       if (!dataChannel) return;
-      // Mouse events
-      video.addEventListener('mousedown', e => sendInput({type: 'mousedown', x: e.offsetX, y: e.offsetY, button: e.button}));
-      video.addEventListener('mouseup', e => sendInput({type: 'mouseup', x: e.offsetX, y: e.offsetY, button: e.button}));
-      video.addEventListener('mousemove', e => sendInput({type: 'mousemove', x: e.offsetX, y: e.offsetY}));
-      // Keyboard events
-      window.addEventListener('keydown', e => sendInput({type: 'keydown', key: e.key, code: e.code}));
-      window.addEventListener('keyup', e => sendInput({type: 'keyup', key: e.key, code: e.code}));
+      vlog('Setting up input events');
+      video.addEventListener('mousedown', e => { vlog('mousedown', e); sendInput({type: 'mousedown', x: e.offsetX, y: e.offsetY, button: e.button}); });
+      video.addEventListener('mouseup', e => { vlog('mouseup', e); sendInput({type: 'mouseup', x: e.offsetX, y: e.offsetY, button: e.button}); });
+      video.addEventListener('mousemove', e => { vlog('mousemove', e); sendInput({type: 'mousemove', x: e.offsetX, y: e.offsetY}); });
+      window.addEventListener('keydown', e => { vlog('keydown', e); sendInput({type: 'keydown', key: e.key, code: e.code}); });
+      window.addEventListener('keyup', e => { vlog('keyup', e); sendInput({type: 'keyup', key: e.key, code: e.code}); });
     }
 
     function sendInput(obj) {
       if (dataChannel && dataChannel.readyState === 'open') {
+        vlog('Sending input:', obj);
         dataChannel.send(JSON.stringify(obj));
       }
     }
@@ -48,28 +61,43 @@
     const ws = new WebSocket(SIGNALING_URL);
 
     ws.onopen = async () => {
+      vlog('WebSocket connected');
       // Create data channel for input if we are the offerer
       dataChannel = pc.createDataChannel("input");
-      dataChannel.onopen = setupInputEvents;
+      dataChannel.onopen = () => { vlog('Data channel opened (offerer)'); setupInputEvents(); };
+      dataChannel.onclose = () => vlog('Data channel closed (offerer)');
+      dataChannel.onerror = (e) => vlog('Data channel error (offerer):', e);
+      dataChannel.onmessage = (e) => vlog('Data channel message (offerer):', e.data);
+
+      // Tell the browser to expect a video track from the remote peer
+      pc.addTransceiver('video', { direction: 'recvonly' });
 
       // Create and send offer
+      vlog('Creating offer...');
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      vlog('Sending offer:', offer.sdp);
       ws.send(JSON.stringify({type: "offer", sdp: offer.sdp}));
     };
 
     ws.onmessage = async (event) => {
+      vlog('WebSocket message:', event.data);
       const msg = JSON.parse(event.data);
       if (msg.type === "answer") {
+        vlog('Received answer:', msg.sdp);
         await pc.setRemoteDescription(new RTCSessionDescription({type: "answer", sdp: msg.sdp}));
       } else if (msg.type === "candidate") {
+        vlog('Received ICE candidate:', msg.candidate);
         await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
       }
     };
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        vlog('Sending ICE candidate:', event.candidate);
         ws.send(JSON.stringify({type: "candidate", candidate: event.candidate}));
+      } else {
+        vlog('All ICE candidates sent');
       }
     };
   </script>
