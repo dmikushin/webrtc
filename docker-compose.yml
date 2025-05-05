@@ -6,3 +6,5 @@ services:
       - ./:/workspace
     working_dir: /workspace
     command: bash -c "cargo build --release"
+    environment:
+      - RUST_BACKTRACE=1
