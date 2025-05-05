@@ -25,7 +25,7 @@ srtp = { version = "0.14.0", path = "../srtp", package = "webrtc-srtp" }
 stun = { version = "0.7.0", path = "../stun" }
 turn = { version = "0.9.0", path = "../turn" }
 util = { version = "0.10.0", path = "../util", package = "webrtc-util" }
-vpx-encode = "0.6.2"
+vpx-encode = { version = "0.6.2", features = ["vp9"] }
 
 arc-swap = "1"
 tokio = { version = "1.32.0", features = [
