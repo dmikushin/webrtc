@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+
+import subprocess
+import threading
+import sys
+import os
+import signal
+import shutil
+import argparse
+import time
+
+# Configuration
+CARGO_BUILD_COMMAND = "cargo build --release"
+
+CMAKE_PROJECTS_TO_BUILD = [
+    {
+        "name": "signalling-server",
+        "source_dir": "examples/signalling-server",
+        "cmake_target_name": "signalling-server",
+        "executable_relative_path": "signalling-server"
+    },
+    {
+        "name": "vtk_cube",
+        "source_dir": "examples/examples/vtk-cube",
+        "cmake_target_name": "vtk_cube",
+        "executable_relative_path": "vtk_cube"
+    }
+]
+
+CMAKE_BUILD_DIR = "build" # Top-level build directory where project-specific builds will reside
+CMAKE_CONFIG_ARGS = ["-DCMAKE_BUILD_TYPE=Release"] # Add other CMake config args if needed e.g. ["-G", "Ninja"]
+
+EXECUTABLE_RUN_CONFIG = [
+    {
+        "id": "signalling-server",
+        "type": "cmake",
+        "args": ["--verbose"],
+        "prefix": "[signalling server] "
+    },
+    {
+        "id": "vtk_cube", # Server
+        "type": "cmake",
+        "args": ["--native", "--webrtc", "--verbose", "--signalling", "ws://localhost:8080"],
+        "prefix": "[server] "
+    },
+    {
+        "id": "vtk-cube-client-console",
+        "type": "cargo_example",
+        "cargo_profile": "release", # Must match CARGO_BUILD_COMMAND profile
+        "args": [],
+        "prefix": "[client] "
+    }
+]
+
+# Global list to keep track of Popen objects for cleanup
+processes_to_cleanup = []
+
+def run_build_command(command_list, step_name, cwd=None):
+    print(f"Running {step_name}: {' '.join(command_list)}")
+    try:
+        process = subprocess.run(command_list, check=True, capture_output=True, text=True, cwd=cwd)
+        # Print stdout/stderr for build steps as they can contain useful info/warnings
+        if process.stdout.strip():
+            print(f"--- {step_name} STDOUT ---\n{process.stdout.strip()}")
+        if process.stderr.strip():
+            print(f"--- {step_name} STDERR ---\n{process.stderr.strip()}") # CMake often uses stderr for progress
+        print(f"{step_name} successful.")
+        return True
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(f"{step_name} failed with error code {e.returncode}.\n")
+        if e.stdout.strip(): sys.stderr.write(f"Stdout:\n{e.stdout.strip()}\n")
+        if e.stderr.strip(): sys.stderr.write(f"Stderr:\n{e.stderr.strip()}\n")
+        return False
+    except FileNotFoundError:
+        sys.stderr.write(f"Error: Command '{command_list[0]}' not found for {step_name}. Is it installed and in PATH?\n")
+        return False
+    except Exception as e:
+        sys.stderr.write(f"An unexpected error occurred during {step_name}: {e}\n")
+        return False
+
+def read_and_prefix_output(process, prefix):
+    """Reads output from a process, prefixes it, and prints it."""
+    try:
+        for line in process.stdout: # stdout includes stderr due to Popen redirect
+            sys.stdout.write(prefix + line)
+            sys.stdout.flush()
+        process.wait() # Wait for the process to finish if stdout closes early
+        if process.returncode != 0 and process.returncode is not None : # Check for None if process was terminated by signal
+             # Avoid double printing if already handled by signal_handler's process check
+            if not (hasattr(process, '_terminated_by_signal') and process._terminated_by_signal):
+                sys.stderr.write(f"{prefix}exited with error code {process.returncode}\n")
+    except Exception as e:
+        # Check if the error is due to reading from a closed pipe after termination
+        if process.poll() is not None: # Process has terminated
+            pass # Suppress error if process is already dead (likely terminated by signal_handler)
+        else:
+            sys.stderr.write(f"{prefix}Error reading output: {e}\n")
+
+def signal_handler(sig, frame):
+    sys.stderr.write("\nInterrupt or timeout received, terminating processes...\n") # Modified message
+    for p in reversed(processes_to_cleanup):
+        if p.poll() is None:
+            try:
+                p._terminated_by_signal = True # Mark for read_and_prefix_output
+                p.terminate()
+            except Exception as e:
+                sys.stderr.write(f"Error terminating process {p.pid}: {e}\n")
+    
+    # Give some time for processes to terminate
+    terminated_cleanly = True
+    for p in reversed(processes_to_cleanup):
+        if p.poll() is None:
+            try:
+                p.wait(timeout=2)
+                if p.poll() is None:
+                    p.kill()
+                    sys.stderr.write(f"Process {p.pid} killed.\n")
+                    terminated_cleanly = False
+            except Exception as e:
+                sys.stderr.write(f"Error waiting/killing process {p.pid}: {e}\n")
+                terminated_cleanly = False
+    
+    if not terminated_cleanly:
+        sys.exit(1) # Exit with error if force kill was needed
+    else:
+        print("All processes terminated gracefully.")
+        sys.exit(0) # Exit cleanly if all terminated or were already done
+
+def main():
+    parser = argparse.ArgumentParser(description="Run and manage the WebRTC pipeline.")
+    parser.add_argument("--timeout", type=int, default=15, help="Duration in seconds to run the processes before shutting them down. Default is 15 seconds.")
+    args = parser.parse_args()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # 1. Perform Cargo build
+    print("--- Starting Cargo Build Phase ---")
+    if not run_build_command(CARGO_BUILD_COMMAND.split(), "Cargo build (libraries/binaries)"): # Clarified step name
+        sys.exit(1)
+
+    # Build the specific Cargo example needed for execution
+    print("--- Building vtk-cube-client-console Cargo example ---")
+    cargo_example_build_command = ["cargo", "build", "--release", "--example", "vtk-cube-client-console"]
+    if not run_build_command(cargo_example_build_command, "Cargo build (vtk-cube-client-console example)"):
+        sys.exit(1)
+
+    # 2. Perform CMake builds
+    print("\n--- Starting CMake Build Phase ---")
+    # os.makedirs(CMAKE_BUILD_DIR, exist_ok=True) # Top-level build dir created as needed by project subdirs
+
+    # Removed global CMake configure command that was here
+
+    for project in CMAKE_PROJECTS_TO_BUILD:
+        project_name = project['name']
+        project_source_dir = project['source_dir']
+        # Project-specific build directory, e.g., build/signalling-server
+        project_build_dir = os.path.join(CMAKE_BUILD_DIR, project_name)
+
+        # Clean the project-specific build directory before configuration
+        if os.path.exists(project_build_dir):
+            print(f"--- Cleaning existing build directory: {project_build_dir} ---")
+            shutil.rmtree(project_build_dir)
+
+        os.makedirs(project_build_dir, exist_ok=True)
+
+        print(f"--- Configuring CMake project: {project_name} ---")
+        cmake_configure_cmd = ["cmake", "-S", project_source_dir, "-B", project_build_dir] + CMAKE_CONFIG_ARGS
+        if not run_build_command(cmake_configure_cmd, f"CMake configure ({project_name})", cwd=None): # cwd is root
+            sys.exit(1)
+
+        target_name = project['cmake_target_name']
+        print(f"--- Building CMake project: {project_name} (Target: {target_name}) ---")
+        # Build command now uses the project_build_dir
+        cmake_build_cmd = ["cmake", "--build", project_build_dir, "--target", target_name]
+        if not run_build_command(cmake_build_cmd, f"CMake build ({target_name})", cwd=None): # cwd is root
+            sys.exit(1)
+    
+    print("\n--- Build phases completed ---")
+
+    # 3. Resolve executable paths and prepare for execution
+    executable_paths = {}
+    for proj_spec in CMAKE_PROJECTS_TO_BUILD:
+        project_name = proj_spec["name"]
+        # Path to the project's specific build directory
+        project_build_dir = os.path.join(CMAKE_BUILD_DIR, project_name)
+        # Executable path is within its project's build directory
+        path = os.path.join(project_build_dir, proj_spec["executable_relative_path"])
+        if not (os.path.exists(path) and os.access(path, os.X_OK)):
+            sys.stderr.write(f"Error: CMake executable '{path}' for target '{proj_spec['name']}' not found or not executable after build.\nEnsure 'executable_relative_path' is correct relative to its project's build directory.\n")
+            sys.exit(1)
+        executable_paths[proj_spec["name"]] = path
+    
+    for run_spec in EXECUTABLE_RUN_CONFIG:
+        if run_spec["type"] == "cargo_example":
+            cargo_example_name = run_spec["id"]
+            cargo_profile = run_spec["cargo_profile"]
+            # Cargo examples are typically in target/<profile>/examples/<example_name>
+            # For executables from workspace members (not examples), it would be target/<profile>/<name>
+            path_cargo = os.path.join("target", cargo_profile, "examples", cargo_example_name)
+            if not (os.path.exists(path_cargo) and os.access(path_cargo, os.X_OK)):
+                sys.stderr.write(f"Error: Cargo example executable '{path_cargo}' for '{cargo_example_name}' not found or not executable.\n")
+                sys.exit(1)
+            executable_paths[cargo_example_name] = path_cargo
+
+    commands_to_run = []
+    for run_spec in EXECUTABLE_RUN_CONFIG:
+        exec_id = run_spec["id"]
+        resolved_path = executable_paths.get(exec_id)
+        if not resolved_path:
+            sys.stderr.write(f"Error: Path for executable ID '{exec_id}' not resolved. Check EXECUTABLE_RUN_CONFIG setup.\n")
+            sys.exit(1)
+        
+        full_cmd = [os.path.abspath(resolved_path)] + run_spec["args"] # Use absolute path
+        commands_to_run.append({
+            "cmd": full_cmd,
+            "prefix": run_spec["prefix"],
+            "name": exec_id 
+        })
+
+    # 4. Run executables in parallel
+    threads = []
+    print("\n--- Starting executables in parallel ---")
+    timeout_occurred = False # Flag to indicate if timeout happened
+
+    try:
+        for config in commands_to_run:
+            print(f"Starting: {' '.join(config['cmd'])}")
+            # Ensure the executable exists and is executable right before running
+            if not (os.path.exists(config['cmd'][0]) and os.access(config['cmd'][0], os.X_OK)):
+                 sys.stderr.write(f"Critical Error: Executable {config['cmd'][0]} for {config['name']} disappeared or lost permissions before execution.\n")
+                 signal_handler(None, None) # Attempt to clean up anything already started
+                 sys.exit(1)
+
+            process = subprocess.Popen(
+                config["cmd"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            processes_to_cleanup.append(process)
+
+            thread = threading.Thread(target=read_and_prefix_output, args=(process, config["prefix"]))
+            threads.append(thread)
+            thread.start()
+        
+        print(f"\n--- Processes running. Waiting for timeout ({args.timeout}s) or manual interruption ---")
+        # Wait for the specified timeout
+        # We'll loop with a short sleep to allow SIGINT to be processed promptly
+        for _ in range(args.timeout):
+            if any(p.poll() is not None for p in processes_to_cleanup):
+                # A process ended prematurely, proceed to cleanup
+                print("\n--- A process ended prematurely, proceeding to shutdown. ---")
+                break
+            time.sleep(1) # Sleep for 1 second
+        else: # This else block executes if the loop completed without a break
+            print(f"\n--- Timeout of {args.timeout} seconds reached. Initiating shutdown. ---")
+            timeout_occurred = True
+            signal_handler(None, None) # Manually trigger shutdown
+
+        # Wait for all threads (and thus processes) to complete
+        # This join will happen after timeout or if processes end on their own
+        for thread in threads:
+            thread.join()
+
+        print("\n--- All processes finished or were terminated ---") # Modified message
+        
+        all_successful = True
+        for i, p in enumerate(processes_to_cleanup):
+            # If a timeout occurred, a non-zero return code due to termination is expected
+            # So we only consider it an "application" error if no timeout occurred
+            if p.returncode != 0 and p.returncode is not None:
+                if not timeout_occurred and not (hasattr(p, '_terminated_by_signal') and p._terminated_by_signal):
+                    sys.stderr.write(f"Process '{commands_to_run[i]['name']}' exited with code {p.returncode}\n")
+                    all_successful = False
+                elif timeout_occurred and not (hasattr(p, '_terminated_by_signal') and p._terminated_by_signal):
+                    # If timeout occurred, and it wasn't terminated by our signal handler (e.g. crashed before)
+                    # it might still be an issue to note, but not a failure of the timeout mechanism itself.
+                    print(f"Note: Process '{commands_to_run[i]['name']}' had exit code {p.returncode} after timeout.")
+
+
+        if not all_successful and not timeout_occurred: # Only exit with 1 if it wasn't a planned timeout shutdown
+            sys.exit(1)
+        elif timeout_occurred:
+            print("Shutdown due to timeout completed.")
+            sys.exit(0) # Exit cleanly after a timeout
+
+    except FileNotFoundError as e: 
+        sys.stderr.write(f"Error: An executable was not found during launch: {e.filename}. This should have been caught earlier.\n")
+        signal_handler(None, None) 
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"An unexpected error occurred during parallel execution: {e}\n")
+        signal_handler(None, None)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

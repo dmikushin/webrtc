@@ -72,8 +72,15 @@ public:
     void start() {
         ws_.setUrl(url_);
         ws_.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
-            if (msg->type == ix::WebSocketMessageType::Message && on_message_) {
+            if (msg->type == ix::WebSocketMessageType::Open) {
+                std::cout << "[SignalingClient] WebSocket connection opened to: " << url_ << std::endl;
+            } else if (msg->type == ix::WebSocketMessageType::Message && on_message_) {
+                std::cout << "[SignalingClient] Message received: " << msg->str << std::endl; // Added log
                 on_message_(msg->str);
+            } else if (msg->type == ix::WebSocketMessageType::Error) {
+                std::cerr << "[SignalingClient] WebSocket error: " << msg->errorInfo.reason << std::endl;
+            } else if (msg->type == ix::WebSocketMessageType::Close) {
+                std::cout << "[SignalingClient] WebSocket connection closed. Code: " << msg->closeInfo.code << " Reason: " << msg->closeInfo.reason << std::endl;
             }
         });
         ws_.start();
@@ -89,6 +96,9 @@ private:
     std::function<void(const std::string&)> on_message_;
     ix::WebSocket ws_;
 };
+
+// Global verbose flag for C-style callbacks
+static bool verbose_global_for_signal_callback = false;
 
 int main(int argc, char* argv[])
 {
@@ -111,6 +121,7 @@ int main(int argc, char* argv[])
         if (arg == "--verbose") verbose = true;
     }
     if (!native_output && !webrtc_output) native_output = true; // Default
+    verbose_global_for_signal_callback = verbose; // Set global verbose flag
 
     WebRTCContext webrtc_ctx;
     std::unique_ptr<SignalingClient> signalling_client;
@@ -129,27 +140,131 @@ int main(int argc, char* argv[])
         }
         // Set up signaling client
         signalling_client = std::make_unique<SignalingClient>(signalling_url, [&](const std::string& msg) {
-            if (verbose) std::cout << "[Signaling] Received: " << msg << std::endl;
+            // This is the on_message_ callback passed to SignalingClient
+            // The [SignalingClient] Message received: log is now inside IXWebSocket's callback
+            if (verbose) std::cout << "[WebRTC App] Processing message from SignalingClient: " << msg << std::endl;
             // Parse JSON and dispatch to WebRTC session
             try {
                 auto j = nlohmann::json::parse(msg);
-                if (j["type"] == "offer" || j["type"] == "answer") {
-                    webrtc_session_set_remote_description(webrtc_ctx.session, msg.c_str());
-                } else if (j["type"] == "candidate") {
-                    webrtc_session_add_ice_candidate(webrtc_ctx.session, msg.c_str());
+                std::string type = j.value("type", ""); // Get type, default to empty string if not found
+
+                if (type == "Offer" || type == "Answer") { // Match "Offer" and "Answer" from Rust client
+                    if (j.contains("data") && j["data"].contains("sdp")) {
+                        std::string sdp = j["data"]["sdp"].get<std::string>();
+                        // Construct the JSON string expected by webrtc_session_set_remote_description
+                        // It typically expects an object like: { "type": "offer", "sdp": "..." }
+                        // The C API might be parsing this directly.
+                        // We need to ensure the C API gets the correct format.
+                        // Let's try passing a reconstructed simple JSON if the C API expects that,
+                        // or check if the C API can handle just the SDP string directly (less likely for set_remote_description).
+                        // For now, let's assume the C API's webrtc_session_set_remote_description wants a JSON string
+                        // that looks like { "type": "offer/answer", "sdp": "..." }
+                        nlohmann::json sdp_payload;
+                        sdp_payload["type"] = type == "Offer" ? "offer" : "answer"; // C API might expect lowercase
+                        sdp_payload["sdp"] = sdp;
+                        std::string sdp_payload_str = sdp_payload.dump();
+                        if (verbose) std::cout << "[WebRTC App] Parsed SDP: " << sdp << std::endl;
+                        if (verbose) std::cout << "[WebRTC App] Passing to C API (set_remote_description): " << sdp_payload_str << std::endl;
+                        webrtc_session_set_remote_description(webrtc_ctx.session, sdp_payload_str.c_str());
+                    } else {
+                        std::cerr << "[Signaling] Malformed Offer/Answer: missing data.sdp field: " << msg << std::endl;
+                    }
+                } else if (type == "IceCandidate") { // Match "IceCandidate" from Rust client
+                    if (j.contains("data") && j["data"].contains("candidate") && j["data"].contains("sdp_mid") && j["data"].contains("sdp_mline_index")) {
+                        // Reconstruct the JSON string expected by webrtc_session_add_ice_candidate
+                        // e.g., { "candidate": "...", "sdpMid": "...", "sdpMLineIndex": ... }
+                        nlohmann::json ice_payload;
+                        ice_payload["candidate"] = j["data"]["candidate"].get<std::string>();
+                        ice_payload["sdpMid"] = j["data"]["sdp_mid"].get<std::string>(); // Ensure key case matches C API expectation
+                        ice_payload["sdpMLineIndex"] = j["data"]["sdp_mline_index"].get<unsigned int>(); // Ensure key case
+                        std::string ice_payload_str = ice_payload.dump();
+                        if (verbose) std::cout << "[WebRTC App] Parsed ICE Candidate: " << ice_payload_str << std::endl;
+                        if (verbose) std::cout << "[WebRTC App] Passing to C API (add_ice_candidate): " << ice_payload_str << std::endl;
+                        webrtc_session_add_ice_candidate(webrtc_ctx.session, ice_payload_str.c_str());
+                    } else {
+                        std::cerr << "[Signaling] Malformed IceCandidate: missing fields: " << msg << std::endl;
+                    }
                 }
-            } catch (...) {
-                std::cerr << "[Signaling] Failed to parse message: " << msg << std::endl;
+            } catch (const nlohmann::json::parse_error& e) {
+                std::cerr << "[Signaling] Failed to parse JSON message: " << msg << " Error: " << e.what() << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[Signaling] Error processing message: " << msg << " Error: " << e.what() << std::endl;
             }
         });
         // Register callback to send local signaling messages to the browser
         webrtc_session_set_signal_callback(
             webrtc_ctx.session,
-            [](const char* msg, void* user_data) {
-                if (user_data && msg) {
-                    static_cast<SignalingClient*>(user_data)->send(msg);
-                    // Print outgoing message if verbose
-                    std::cout << "[Signaling] Sent: " << msg << std::endl;
+            [](const char* flat_msg_cstr, void* user_data) {
+                if (user_data && flat_msg_cstr) {
+                    std::string flat_msg_str(flat_msg_cstr);
+                    if (verbose_global_for_signal_callback) {
+                        std::cout << "[WebRTC App] C API generated flat message: " << flat_msg_str << std::endl;
+                    }
+
+                    try {
+                        auto j_flat = nlohmann::json::parse(flat_msg_str);
+                        std::string type = j_flat.value("type", ""); 
+                        
+                        if (verbose_global_for_signal_callback) {
+                            std::cout << "[DEBUG C++ CB] Parsed type: \'" << type << "\'" << std::endl;
+                            std::cout << "[DEBUG C++ CB] j_flat.dump(2): " << j_flat.dump(2) << std::endl;
+                            std::cout << "[DEBUG C++ CB] j_flat.contains(\"candidate\"): " << (j_flat.contains("candidate") ? "true" : "false") << std::endl;
+                            std::cout << "[DEBUG C++ CB] j_flat.contains(\"sdpMid\"): " << (j_flat.contains("sdpMid") ? "true" : "false") << std::endl;
+                            std::cout << "[DEBUG C++ CB] j_flat.contains(\"sdpMLineIndex\"): " << (j_flat.contains("sdpMLineIndex") ? "true" : "false") << std::endl;
+                        }
+                        
+                        nlohmann::json j_nested_outer;
+                        nlohmann::json j_nested_data;
+                        bool message_handled = false;
+
+                        if (type == "answer") {
+                            j_nested_outer["type"] = "Answer"; // Match Rust client's expected case
+                            j_nested_data["sdp"] = j_flat.value("sdp", "");
+                            j_nested_outer["data"] = j_nested_data;
+                            message_handled = true;
+                        } else if (type == "offer") {
+                            // This case should ideally not happen if server is only answering.
+                            // But if C API could generate an offer (e.g. for renegotiation)
+                            j_nested_outer["type"] = "Offer";
+                            j_nested_data["sdp"] = j_flat.value("sdp", "");
+                            j_nested_outer["data"] = j_nested_data;
+                            message_handled = true;
+                        } else if (j_flat.contains("candidate") && j_flat.contains("sdpMid") && j_flat.contains("sdpMLineIndex")) {
+                            // This is an ICE candidate from the C API (which doesn't set a "type" field for candidates)
+                            // Let's ensure 'type' is empty or not 'answer'/'offer' to be more specific,
+                            // though checking for candidate fields is quite robust.
+                            if (type.empty() || (type != "answer" && type != "offer")) {
+                                j_nested_outer["type"] = "IceCandidate"; // Match Rust client's expected case
+                                j_nested_data["candidate"] = j_flat.value("candidate", "");
+                                // sdpMid from C API is often empty or "0", ensure it's string.
+                                j_nested_data["sdp_mid"] = j_flat.value("sdpMid", ""); 
+                                j_nested_data["sdp_mline_index"] = j_flat.value("sdpMLineIndex", 0);
+                                // usernameFragment is often null, Rust side expects it to be omitted or string.
+                                // The current Rust SignalMessage for IceCandidate doesn't include usernameFragment, so we omit it.
+                                j_nested_outer["data"] = j_nested_data;
+                                message_handled = true;
+                            }
+                        }
+                        
+                        if (message_handled) {
+                            std::string nested_msg_str = j_nested_outer.dump();
+                            if (verbose_global_for_signal_callback) {
+                                std::cout << "[WebRTC App] Sending nested message: " << nested_msg_str << std::endl;
+                            }
+                            static_cast<SignalingClient*>(user_data)->send(nested_msg_str);
+                        } else {
+                            // If type is unknown or not one we want to nest, send as-is or log error
+                            std::cerr << "[WebRTC App] Unknown message type or structure from C API for nesting: " << flat_msg_str << std::endl;
+                            static_cast<SignalingClient*>(user_data)->send(flat_msg_str); // Send original flat message
+                        }
+
+                    } catch (const nlohmann::json::parse_error& e) {
+                        std::cerr << "[WebRTC App] Failed to parse flat JSON from C API: " << flat_msg_str << " Error: " << e.what() << std::endl;
+                        static_cast<SignalingClient*>(user_data)->send(flat_msg_str); // Send original on error
+                    } catch (const std::exception& e) {
+                        std::cerr << "[WebRTC App] Error processing message from C API for nesting: " << flat_msg_str << " Error: " << e.what() << std::endl;
+                        static_cast<SignalingClient*>(user_data)->send(flat_msg_str); // Send original on error
+                    }
                 }
             },
             signalling_client.get()
@@ -207,11 +322,19 @@ int main(int argc, char* argv[])
             rendererW->SetBackground(0.1, 0.2, 0.4);
             size_t frame_idx = 0;
             while (running) {
-                std::unique_lock<std::mutex> lock(dirty_mutex);
-                dirty_cv.wait(lock, [&]() { return scene_dirty || !running; });
-                if (!running) break;
-                scene_dirty = false;
-                lock.unlock();
+                if (native_output) { // Only use condition variable if native output is also active
+                    std::unique_lock<std::mutex> lock(dirty_mutex);
+                    dirty_cv.wait(lock, [&]() { return scene_dirty || !running; });
+                    if (!running) break;
+                    scene_dirty = false;
+                    lock.unlock();
+                } else { // If not native_output, we are in WebRTC-only mode, stream continuously
+                    // Ensure we don't spin too fast if rendering is very quick,
+                    // though render_webrtc itself has a sleep.
+                    // We might also want to set scene_dirty = true here if other logic depends on it,
+                    // but for simple continuous streaming, just proceeding to render is fine.
+                }
+
                 offscreenRenderWindow->Render();
                 vtkNew<vtkWindowToImageFilter> windowToImageFilter;
                 windowToImageFilter->SetInput(offscreenRenderWindow);
