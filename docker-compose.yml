@@ -5,6 +5,6 @@ services:
     volumes:
       - ./:/workspace
     working_dir: /workspace
-    command: bash -c "cargo build --release"
+    command: bash -c "cd examples && cargo build --release --example vtk-cube-client-console"
     environment:
       - RUST_BACKTRACE=1

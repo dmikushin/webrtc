@@ -10,11 +10,10 @@ homepage = "https://webrtc.rs"
 repository = "https://github.com/webrtc-rs/webrtc/tree/master/examples"
 
 [dependencies]
-
-
-[dev-dependencies]
 webrtc = { path = "../webrtc" }
-
+interceptor = { path = "../interceptor" }
+url = "2"
+futures-util = "0.3"
 tokio = { version = "1.32.0", features = ["full"] }
 env_logger = "0.11.3"
 clap = "3"
@@ -29,7 +28,10 @@ serde_json = "1"
 bytes = "1"
 lazy_static = "1"
 rand = "0.8"
+tokio-tungstenite = "0.21"
+tungstenite = "0.21"
 
+[dev-dependencies]
 memchr = "2.1.1"
 
 [[example]]
@@ -150,4 +152,9 @@ bench = false
 [[example]]
 name = "ice-restart"
 path = "examples/ice-restart/ice-restart.rs"
+bench = false
+
+[[example]]
+name = "vtk-cube-client-console"
+path = "examples/vtk-cube-client-console/vtk-cube-client-console.rs"
 bench = false

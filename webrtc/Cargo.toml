@@ -74,4 +74,4 @@ vendored-openssl = ["srtp/vendored-openssl"]
 
 [lib]
 name = "webrtc"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
