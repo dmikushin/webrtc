@@ -41,9 +41,16 @@ impl Conn for Endpoint {
     /// reads a packet of len(p) bytes from the underlying conn
     /// that are matched by the associated MuxFunc
     async fn recv(&self, buf: &mut [u8]) -> Result<usize> {
+        log::warn!("[Mux Endpoint {}] recv: Attempting to read from buffer", self.id);
         match self.buffer.read(buf, None).await {
-            Ok(n) => Ok(n),
-            Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string()).into()),
+            Ok(n) => {
+                log::warn!("[Mux Endpoint {}] recv: Successfully read {} bytes from buffer", self.id, n);
+                Ok(n)
+            },
+            Err(err) => {
+                log::error!("[Mux Endpoint {}] recv: Error reading from buffer: {}", self.id, err);
+                Err(io::Error::new(io::ErrorKind::Other, err.to_string()).into())
+            },
         }
     }
     async fn recv_from(&self, _buf: &mut [u8]) -> Result<(usize, SocketAddr)> {

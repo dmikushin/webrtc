@@ -124,10 +124,19 @@ impl Mux {
     ) -> Result<()> {
         let mut endpoint = None;
 
+        log::warn!("[Mux dispatch] Received packet of {} bytes", buf.len());
+        if !buf.is_empty() {
+            log::warn!("[Mux dispatch] Packet starts with byte value: {}", buf[0]);
+        }
+
         {
             let eps = endpoints.lock().await;
-            for ep in eps.values() {
-                if (ep.match_fn)(buf) {
+            log::warn!("[Mux dispatch] Looking for matching endpoint among {} registered endpoints", eps.len());
+            
+            for (id, ep) in eps.iter() {
+                let matches = (ep.match_fn)(buf);
+                log::warn!("[Mux dispatch] Testing endpoint {}: match = {}", id, matches);
+                if matches {
                     endpoint = Some(Arc::clone(ep));
                     break;
                 }
@@ -135,21 +144,25 @@ impl Mux {
         }
 
         if let Some(ep) = endpoint {
+            log::warn!("[Mux dispatch] Found matching endpoint (id: {}), writing {} bytes to buffer", ep.id, buf.len());
             match ep.buffer.write(buf).await {
                 // Expected when bytes are received faster than the endpoint can process them
                 Err(Error::ErrBufferFull) => {
-                    log::info!("mux: endpoint buffer is full, dropping packet")
+                    log::warn!("[Mux dispatch] Endpoint buffer is full, dropping packet")
                 }
-                Ok(_) => (),
-                Err(e) => return Err(crate::Error::Util(e)),
+                Ok(n) => log::warn!("[Mux dispatch] Successfully wrote {} bytes to endpoint buffer", n),
+                Err(e) => {
+                    log::error!("[Mux dispatch] Error writing to endpoint buffer: {:?}", e);
+                    return Err(crate::Error::Util(e));
+                }
             }
         } else if !buf.is_empty() {
             log::warn!(
-                "Warning: mux: no endpoint for packet starting with {}",
+                "[Mux dispatch] No matching endpoint for packet starting with byte {}",
                 buf[0]
             );
         } else {
-            log::warn!("Warning: mux: no endpoint for zero length packet");
+            log::warn!("[Mux dispatch] No matching endpoint for zero length packet");
         }
 
         Ok(())
