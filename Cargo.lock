@@ -1468,7 +1468,6 @@ dependencies = [
  "tokio",
  "tokio-test",
  "waitgroup",
- "webrtc-srtp",
  "webrtc-util",
 ]
 
@@ -3144,11 +3143,13 @@ dependencies = [
  "aead",
  "aes",
  "aes-gcm",
+ "async-trait",
  "byteorder",
  "bytes",
  "criterion",
  "ctr",
  "hmac",
+ "interceptor",
  "lazy_static",
  "log",
  "openssl",

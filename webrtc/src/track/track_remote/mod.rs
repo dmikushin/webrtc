@@ -215,23 +215,41 @@ impl TrackRemote {
     /// **Cancel Safety:** This method is not cancel safe. Dropping the resulting [`Future`] before
     /// it returns [`std::task::Poll::Ready`] will cause data loss.
     pub async fn read(&self, b: &mut [u8]) -> Result<(rtp::packet::Packet, Attributes)> {
+        log::info!("[TrackRemote {}] read: called", self.tid);
         {
             // Internal lock scope
             let mut internal = self.internal.lock().await;
             if let Some((pkt, attributes)) = internal.peeked.pop_front() {
-                self.check_and_update_track(&pkt).await?;
-
+                log::info!("[TrackRemote {}] read: got packet from peeked queue (SSRC: {}, PT: {})", self.tid, pkt.header.ssrc, pkt.header.payload_type);
+                self.check_and_update_track(&pkt).await.map_err(|e| {
+                    log::error!("[TrackRemote {}] read: error in check_and_update_track for peeked packet: {:?}", self.tid, e);
+                    e
+                })?;
+                log::info!("[TrackRemote {}] read: returning peeked packet", self.tid);
                 return Ok((pkt, attributes));
             }
         };
 
         let receiver = match self.receiver.as_ref().and_then(|r| r.upgrade()) {
             Some(r) => r,
-            None => return Err(Error::ErrRTPReceiverNil),
+            None => {
+                log::error!("[TrackRemote {}] read: RTPReceiver is nil", self.tid);
+                return Err(Error::ErrRTPReceiverNil);
+            }
         };
 
-        let (pkt, attributes) = receiver.read_rtp(b, self.tid).await?;
-        self.check_and_update_track(&pkt).await?;
+        log::info!("[TrackRemote {}] read: calling receiver.read_rtp (tid: {})", self.tid, self.tid);
+        let (pkt, attributes) = receiver.read_rtp(b, self.tid).await.map_err(|e| {
+            log::error!("[TrackRemote {}] read: receiver.read_rtp error: {:?}", self.tid, e);
+            e
+        })?;
+        log::info!("[TrackRemote {}] read: receiver.read_rtp successful (SSRC: {}, PT: {}, Seq: {})", self.tid, pkt.header.ssrc, pkt.header.payload_type, pkt.header.sequence_number);
+
+        self.check_and_update_track(&pkt).await.map_err(|e| {
+            log::error!("[TrackRemote {}] read: error in check_and_update_track for new packet: {:?}", self.tid, e);
+            e
+        })?;
+        log::info!("[TrackRemote {}] read: returning new packet", self.tid);
         Ok((pkt, attributes))
     }
 
@@ -270,15 +288,31 @@ impl TrackRemote {
 
     /// read_rtp is a convenience method that wraps Read and unmarshals for you.
     pub async fn read_rtp(&self) -> Result<(rtp::packet::Packet, Attributes)> {
+        log::info!("[TrackRemote {}] read_rtp: called", self.tid);
         let mut b = vec![0u8; self.receive_mtu];
-        let (pkt, attributes) = self.read(&mut b).await?;
-
+        let (pkt, attributes) = self.read(&mut b).await.map_err(|e| {
+            log::error!("[TrackRemote {}] read_rtp: self.read error: {:?}", self.tid, e);
+            e
+        })?;
+        log::info!("[TrackRemote {}] read_rtp: self.read successful (SSRC: {}, PT: {}, Seq: {})", self.tid, pkt.header.ssrc, pkt.header.payload_type, pkt.header.sequence_number);
         Ok((pkt, attributes))
     }
 
     /// peek is like Read, but it doesn't discard the packet read
     pub(crate) async fn peek(&self, b: &mut [u8]) -> Result<(rtp::packet::Packet, Attributes)> {
-        let (pkt, a) = self.read(b).await?;
+        log::info!("[TrackRemote {}] peek: called", self.tid);
+        let read_result = self.read(b).await;
+
+        match &read_result {
+            Ok((pkt, _)) => {
+                log::info!("[TrackRemote {}] peek: self.read successful (SSRC: {}, PT: {}, Seq: {})", self.tid, pkt.header.ssrc, pkt.header.payload_type, pkt.header.sequence_number);
+            }
+            Err(e) => {
+                log::error!("[TrackRemote {}] peek: self.read error: {:?}", self.tid, e);
+            }
+        }
+
+        let (pkt, a) = read_result?;
 
         // this might overwrite data if somebody peeked between the Read
         // and us getting the lock.  Oh well, we'll just drop a packet in
@@ -286,7 +320,9 @@ impl TrackRemote {
         {
             let mut internal = self.internal.lock().await;
             internal.peeked.push_back((pkt.clone(), a.clone()));
+            log::info!("[TrackRemote {}] peek: packet pushed to peeked queue (SSRC: {}, PT: {})", self.tid, pkt.header.ssrc, pkt.header.payload_type);
         }
+        log::info!("[TrackRemote {}] peek: returning", self.tid);
         Ok((pkt, a))
     }
 

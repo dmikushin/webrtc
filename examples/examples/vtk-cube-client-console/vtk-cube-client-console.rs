@@ -13,7 +13,9 @@ use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState; // Corre
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate; // Added for on_ice_candidate
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_remote::TrackRemote;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc::rtp_transceiver::rtp_codec::{RTPCodecType, RTCRtpCodecParameters, RTCRtpCodecCapability}; // Added RTCRtpCodecParameters and RTCRtpCodecCapability
+use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection; // Added import
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit; // Added import
 use futures_util::{StreamExt, SinkExt};
 use std::sync::Arc;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
@@ -45,7 +47,29 @@ async fn main() {
 
             // Set up WebRTC API and PeerConnection
             let mut m = MediaEngine::default();
-            m.register_default_codecs().expect("Failed to register codecs");
+            // m.register_default_codecs().expect("Failed to register codecs"); // Commented out default codecs
+
+            // Explicitly register VP9 codec with payload type 98
+            m.register_codec(
+                RTCRtpCodecParameters {
+                    capability: RTCRtpCodecCapability {
+                        mime_type: "video/VP9".to_owned(), // Changed to VP9
+                        clock_rate: 90000,
+                        channels: 0,
+                        sdp_fmtp_line: "".to_owned(), // VP9 might need specific fmtp lines, e.g., "profile-id=0"
+                        rtcp_feedback: vec![],
+                    },
+                    payload_type: 98, // Changed to 98 for VP9
+                    ..Default::default()
+                },
+                RTPCodecType::Video,
+            )
+            .expect("Failed to register VP9 codec");
+            info!("VP9 codec registered explicitly with payload type 98"); // Updated log message
+
+            // Optionally, register other codecs if needed
+            // Make sure payload types match what the server offers/expects
+
             let registry = register_default_interceptors(Registry::new(), &mut m).unwrap();
             let api = APIBuilder::new()
                 .with_media_engine(m)
@@ -57,9 +81,16 @@ async fn main() {
             info!("PeerConnection created");
 
             // Add video transceiver (recvonly)
-            pc.add_transceiver_from_kind(RTPCodecType::Video, None)
-                .await
-                .expect("Failed to add video transceiver");
+            pc.add_transceiver_from_kind(
+                RTPCodecType::Video,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly, // Corrected casing
+                    send_encodings: Vec::new(), // Explicitly provide empty vec
+                    // Add other fields if necessary, assuming they can be defaulted or are not needed for recvonly
+                }),
+            )
+            .await
+            .expect("Failed to add video transceiver");
             info!("Video transceiver added (recvonly)");
 
             // Log ICE candidates
@@ -94,27 +125,46 @@ async fn main() {
 
             // Set up on_track handler to log frame properties
             pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver: Arc<RTCRtpReceiver>, _transceiver: Arc<RTCRtpTransceiver>| {
-                info!("on_track handler triggered for track: Kind={}, ID={}, StreamID={}", track.kind(), track.id(), track.stream_id());
+                info!("!!! ON_TRACK CALLED !!! Track kind: {}, ID: {}", track.kind(), track.id());
+                
+                let track_clone = Arc::clone(&track);
                 Box::pin(async move {
-                    info!("Received remote track: Kind={}, ID={}, Codec={:?}", track.kind(), track.id(), track.codec()); // Removed .await
+                    info!("Starting to read frames from track ID: {}, SSRC: {}", track_clone.id(), track_clone.ssrc());
+                    info!("Codec details: {:?}", track_clone.codec());
+                    
+                    let mut frame_counter = 0;
+                    
+                    // Loop to read frames from the track
                     loop {
-                        match track.read_rtp().await {
-                            Ok((rtp, _)) => {
-                                info!( // Changed to info!
-                                    "Frame received: SSRC={}, Timestamp={}, PayloadType={}, Size={} bytes",
-                                    rtp.header.ssrc, rtp.header.timestamp, rtp.header.payload_type, rtp.payload.len()
+                        match track_clone.read_rtp().await {
+                            Ok((rtp_packet, _)) => {
+                                frame_counter += 1;
+                                info!(
+                                    "FRAME #{}: SSRC={}, SeqNum={}, Timestamp={}, PayloadType={}, Payload size={} bytes",
+                                    frame_counter,
+                                    rtp_packet.header.ssrc,
+                                    rtp_packet.header.sequence_number,
+                                    rtp_packet.header.timestamp,
+                                    rtp_packet.header.payload_type,
+                                    rtp_packet.payload.len()
                                 );
-                            }
+                                
+                                // For VP9, we could potentially log more details about the frame
+                                if frame_counter % 30 == 0 {
+                                    info!("Received {} frames so far on track {}", frame_counter, track_clone.id());
+                                }
+                            },
                             Err(e) => {
-                                log::error!("Error reading RTP packet from track {}: {}", track.id(), e);
+                                log::error!("Error reading RTP packet from track {}: {}", track_clone.id(), e);
                                 break;
                             }
                         }
                     }
-                    info!("Exiting on_track loop for track {}", track.id());
+                    
+                    info!("Exiting on_track loop for track {}, total frames received: {}", track_clone.id(), frame_counter);
                 })
             }));
-            info!("on_track handler set up");
+            info!("on_track handler set up with enhanced frame logging");
 
             // Create and send offer
             match pc.create_offer(None).await {

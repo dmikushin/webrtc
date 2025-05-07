@@ -155,11 +155,20 @@ impl RTPReader for GeneratorStream {
         buf: &mut [u8],
         a: &Attributes,
     ) -> Result<(rtp::packet::Packet, Attributes)> {
-        let (pkt, attr) = self.parent_rtp_reader.read(buf, a).await?;
-
-        self.add(pkt.header.sequence_number);
-
-        Ok((pkt, attr))
+        log::warn!("[NACK GeneratorStream] read: called for SSRC (info.ssrc will be from when stream was bound)");
+        let res = self.parent_rtp_reader.read(buf, a).await;
+        if let Ok((ref pkt, _)) = res {
+            log::warn!(
+                "[NACK GeneratorStream] read: parent.read successful, got packet PT: {}, Seq: {}, SSRC: {}",
+                pkt.header.payload_type,
+                pkt.header.sequence_number,
+                pkt.header.ssrc
+            );
+            self.add(pkt.header.sequence_number);
+        } else if let Err(ref e) = res {
+            log::warn!("[NACK GeneratorStream] read: parent.read error: {:?}", e);
+        }
+        res
     }
 }
 

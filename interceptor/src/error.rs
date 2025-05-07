@@ -22,8 +22,8 @@ pub enum Error {
     #[error("Invalid buffer size")]
     ErrInvalidSize,
 
-    #[error("{0}")]
-    Srtp(#[from] srtp::Error),
+    // #[error("{0}")]
+    // Srtp(#[from] srtp::Error), // Commented out to break cyclic dependency
     #[error("{0}")]
     Rtcp(#[from] rtcp::Error),
     #[error("{0}")]

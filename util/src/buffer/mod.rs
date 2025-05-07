@@ -125,25 +125,32 @@ impl Buffer {
     /// Note that the packet size is limited to 65536 bytes since v0.11.0
     /// due to the internal data structure.
     pub async fn write(&self, packet: &[u8]) -> Result<usize> {
+        log::info!("[Buffer] write: called with packet size: {}", packet.len());
         if packet.len() >= 0x10000 {
+            log::error!("[Buffer] write: packet too big: {}", packet.len());
             return Err(Error::ErrPacketTooBig);
         }
 
         let mut b = self.buffer.lock().await;
+        log::info!("[Buffer] write: locked buffer, count: {}, limit_count: {}, size: {}, limit_size: {}, closed: {}", b.count, b.limit_count, b.size(), b.limit_size, b.closed);
 
         if b.closed {
+            log::error!("[Buffer] write: buffer closed");
             return Err(Error::ErrBufferClosed);
         }
 
         if (b.limit_count > 0 && b.count >= b.limit_count)
             || (b.limit_size > 0 && b.size() + 2 + packet.len() > b.limit_size)
         {
+            log::error!("[Buffer] write: buffer full. Count: {}/{}, Size: {}/{}", b.count, b.limit_count, b.size() + 2 + packet.len(), b.limit_size);
             return Err(Error::ErrBufferFull);
         }
 
         // grow the buffer until the packet fits
         while !b.available(packet.len()) {
+            log::info!("[Buffer] write: growing buffer...");
             b.grow()?;
+            log::info!("[Buffer] write: buffer grown. New capacity: {}", b.data.len());
         }
 
         // store the length of the packet
@@ -174,11 +181,13 @@ impl Buffer {
             b.tail = m;
         }
         b.count += 1;
+        log::info!("[Buffer] write: packet written, new count: {}, new tail: {}", b.count, b.tail);
 
         if b.subs {
             // we have other are waiting data
             self.notify.notify_one();
             b.subs = false;
+            log::info!("[Buffer] write: notified one waiter, set subs = false");
         }
 
         Ok(packet.len())
@@ -189,10 +198,12 @@ impl Buffer {
     // Returns io.ErrShortBuffer is the packet is too small to copy the Write.
     // Returns io.EOF if the buffer is closed.
     pub async fn read(&self, packet: &mut [u8], duration: Option<Duration>) -> Result<usize> {
+        log::info!("[Buffer] read: called");
         loop {
             {
                 // use {} to let LockGuard RAII
                 let mut b = self.buffer.lock().await;
+                log::info!("[Buffer] read: locked buffer, head: {}, tail: {}, closed: {}, subs: {}", b.head, b.tail, b.closed, b.subs);
 
                 if b.head != b.tail {
                     // decode the packet size
@@ -213,6 +224,7 @@ impl Buffer {
                     if copied > packet.len() {
                         copied = packet.len();
                     }
+                    log::info!("[Buffer] read: packet size: {}, copied size: {}", count, copied);
 
                     // copy the data
                     if b.head + copied < b.data.len() {
@@ -239,27 +251,34 @@ impl Buffer {
                     b.count -= 1;
 
                     if copied < count {
+                        log::warn!("[Buffer] read: buffer short, copied: {}, count: {}", copied, count);
                         return Err(Error::ErrBufferShort);
                     }
+                    log::info!("[Buffer] read: successfully read {} bytes", copied);
                     return Ok(copied);
                 } else {
                     // Dont have data -> need wait
                     b.subs = true;
+                    log::info!("[Buffer] read: no data, set subs = true");
                 }
 
                 if b.closed {
+                    log::warn!("[Buffer] read: buffer closed");
                     return Err(Error::ErrBufferClosed);
                 }
             }
 
             // Wait for signal.
+            log::info!("[Buffer] read: waiting for notification");
             if let Some(d) = duration {
                 if timeout(d, self.notify.notified()).await.is_err() {
+                    log::warn!("[Buffer] read: timeout waiting for notification");
                     return Err(Error::ErrTimeout);
                 }
             } else {
                 self.notify.notified().await;
             }
+            log::info!("[Buffer] read: received notification");
         }
     }
 

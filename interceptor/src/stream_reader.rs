@@ -1,3 +1,6 @@
+// COMMENTED OUT TO BREAK CYCLIC DEPENDENCY
+// These trait implementations should be moved to the srtp crate itself
+/*
 use async_trait::async_trait;
 use srtp::stream::Stream;
 
@@ -25,3 +28,4 @@ impl RTCPReader for Stream {
         Ok((self.read_rtcp(buf).await?, a.clone()))
     }
 }
+*/

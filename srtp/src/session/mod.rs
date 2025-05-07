@@ -133,49 +133,100 @@ impl Session {
         remote_context: &mut Context,
         is_rtp: bool,
     ) -> Result<()> {
+        log::warn!("[SRTP Session] incoming: waiting to receive packet from network ({} packet)", if is_rtp { "RTP" } else { "RTCP" });
         let n = udp_rx.recv(buf).await?;
         if n == 0 {
+            log::error!("[SRTP Session] incoming: received empty packet (EOF)");
             return Err(Error::SessionEof);
         }
+        log::warn!("[SRTP Session] incoming: received {} bytes from network ({} packet)", n, if is_rtp { "RTP" } else { "RTCP" });
 
         let decrypted = if is_rtp {
-            remote_context.decrypt_rtp(&buf[0..n])?
+            log::warn!("[SRTP Session] incoming: attempting to decrypt RTP packet of {} bytes", n);
+            match remote_context.decrypt_rtp(&buf[0..n]) {
+                Ok(decrypted) => {
+                    log::warn!("[SRTP Session] incoming: successfully decrypted RTP packet, size: {} bytes", decrypted.len());
+                    decrypted
+                },
+                Err(e) => {
+                    log::error!("[SRTP Session] incoming: failed to decrypt RTP packet: {:?}", e);
+                    return Err(e);
+                }
+            }
         } else {
-            remote_context.decrypt_rtcp(&buf[0..n])?
+            log::warn!("[SRTP Session] incoming: attempting to decrypt RTCP packet of {} bytes", n);
+            match remote_context.decrypt_rtcp(&buf[0..n]) {
+                Ok(decrypted) => {
+                    log::warn!("[SRTP Session] incoming: successfully decrypted RTCP packet, size: {} bytes", decrypted.len());
+                    decrypted
+                },
+                Err(e) => {
+                    log::error!("[SRTP Session] incoming: failed to decrypt RTCP packet: {:?}", e);
+                    return Err(e);
+                }
+            }
         };
 
         let mut buf = &decrypted[..];
         let (ssrcs, header) = if is_rtp {
-            let header = rtp::header::Header::unmarshal(&mut buf)?;
-            (vec![header.ssrc], Some(header))
+            match rtp::header::Header::unmarshal(&mut buf) {
+                Ok(header) => {
+                    log::warn!("[SRTP Session] incoming: successfully parsed RTP header, SSRC: {}, SeqNum: {}, PayloadType: {}", 
+                        header.ssrc, header.sequence_number, header.payload_type);
+                    (vec![header.ssrc], Some(header))
+                },
+                Err(e) => {
+                    log::error!("[SRTP Session] incoming: failed to parse RTP header: {:?}", e);
+                    return Err(e.into());
+                }
+            }
         } else {
-            let pkts = rtcp::packet::unmarshal(&mut buf)?;
-            (destination_ssrc(&pkts), None)
+            match rtcp::packet::unmarshal(&mut buf) {
+                Ok(pkts) => {
+                    let ssrcs = destination_ssrc(&pkts);
+                    log::warn!("[SRTP Session] incoming: successfully parsed RTCP packet with {} SSRCs: {:?}", 
+                        ssrcs.len(), ssrcs);
+                    (ssrcs, None)
+                },
+                Err(e) => {
+                    log::error!("[SRTP Session] incoming: failed to parse RTCP packet: {:?}", e);
+                    return Err(e.into());
+                }
+            }
         };
 
-        for ssrc in ssrcs {
+        for ssrc in &ssrcs {
+            log::warn!("[SRTP Session] incoming: processing packet for SSRC: {}", ssrc);
             let (stream, is_new) =
-                Session::get_or_create_stream(streams_map, close_stream_tx.clone(), is_rtp, ssrc)
+                Session::get_or_create_stream(streams_map, close_stream_tx.clone(), is_rtp, *ssrc)
                     .await;
 
             if is_new {
-                log::trace!(
-                    "srtp session got new {} stream {}",
-                    if is_rtp { "rtp" } else { "rtcp" },
+                log::warn!(
+                    "[SRTP Session] incoming: created new {} stream for SSRC {}",
+                    if is_rtp { "RTP" } else { "RTCP" },
                     ssrc
                 );
-                new_stream_tx
+                match new_stream_tx
                     .send((Arc::clone(&stream), header.clone()))
-                    .await?;
+                    .await {
+                    Ok(_) => log::warn!("[SRTP Session] incoming: successfully notified about new stream for SSRC {}", ssrc),
+                    Err(e) => log::error!("[SRTP Session] incoming: failed to notify about new stream: {:?}", e)
+                }
             }
 
+            log::warn!("[SRTP Session] incoming: writing {} bytes to stream buffer for SSRC {}", decrypted.len(), ssrc);
             match stream.buffer.write(&decrypted).await {
-                Ok(_) => {}
+                Ok(n) => {
+                    log::warn!("[SRTP Session] incoming: successfully wrote {} bytes to stream buffer for SSRC {}", n, ssrc);
+                },
                 Err(err) => {
                     // Silently drop data when the buffer is full.
                     if util::Error::ErrBufferFull != err {
+                        log::error!("[SRTP Session] incoming: failed to write to stream buffer: {:?}", err);
                         return Err(err.into());
                     }
+                    log::warn!("[SRTP Session] incoming: buffer full, dropping packet for SSRC {}", ssrc);
                 }
             }
         }

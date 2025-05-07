@@ -595,25 +595,45 @@ impl RTCDtlsTransport {
         Arc<srtp::stream::Stream>,
         Arc<dyn RTCPReader + Send + Sync>,
     )> {
-        let srtp_session = self
-            .get_srtp_session()
-            .await
-            .ok_or(Error::ErrDtlsTransportNotStarted)?;
-        //log::debug!("streams_for_ssrc: srtp_session.listen ssrc={}", ssrc);
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Creating SRTP streams for SSRC: {}", ssrc);
+        
+        let srtp_session = match self.get_srtp_session().await {
+            Some(session) => session,
+            None => {
+                log::error!("[RTCDtlsTransport] streams_for_ssrc: SRTP session not found, DTLS transport not started for SSRC: {}", ssrc);
+                return Err(Error::ErrDtlsTransportNotStarted);
+            }
+        };
+        
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Opening RTP read stream for SSRC: {}", ssrc);
         let rtp_read_stream = srtp_session.open(ssrc).await;
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Created RTP read stream for SSRC: {}", ssrc);
+        
         let rtp_stream_reader = Arc::clone(&rtp_read_stream) as Arc<dyn RTPReader + Send + Sync>;
+        
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Binding remote stream to interceptor for SSRC: {}", ssrc);
         let rtp_interceptor = interceptor
             .bind_remote_stream(stream_info, rtp_stream_reader)
             .await;
-
-        let srtcp_session = self
-            .get_srtcp_session()
-            .await
-            .ok_or(Error::ErrDtlsTransportNotStarted)?;
-        //log::debug!("streams_for_ssrc: srtcp_session.listen ssrc={}", ssrc);
+        
+        let srtcp_session = match self.get_srtcp_session().await {
+            Some(session) => session,
+            None => {
+                log::error!("[RTCDtlsTransport] streams_for_ssrc: SRTCP session not found, DTLS transport not started for SSRC: {}", ssrc);
+                return Err(Error::ErrDtlsTransportNotStarted);
+            }
+        };
+        
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Opening RTCP read stream for SSRC: {}", ssrc);
         let rtcp_read_stream = srtcp_session.open(ssrc).await;
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Created RTCP read stream for SSRC: {}", ssrc);
+        
         let rtcp_stream_reader = Arc::clone(&rtcp_read_stream) as Arc<dyn RTCPReader + Send + Sync>;
+        
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Binding RTCP reader to interceptor for SSRC: {}", ssrc);
         let rtcp_interceptor = interceptor.bind_rtcp_reader(rtcp_stream_reader).await;
+        
+        log::warn!("[RTCDtlsTransport] streams_for_ssrc: Successfully created all streams for SSRC: {}", ssrc);
 
         Ok((
             rtp_read_stream,

@@ -1169,11 +1169,23 @@ impl PeerConnectionInternal {
             let on_track_handler = Arc::clone(&on_track_handler);
             tokio::spawn(async move {
                 let mut b = vec![0u8; receive_mtu];
+                log::info!(
+                    "[PEER_CONNECTION_INTERNAL] About to peek track SSRC {} StreamID {} ID {}",
+                    track.stream_id(),
+                    track.id(),
+                    track.ssrc()
+                );
                 let pkt = match track.peek(&mut b).await {
-                    Ok((pkt, _)) => pkt,
+                    Ok((pkt, _)) => {
+                        log::info!(
+                            "[PEER_CONNECTION_INTERNAL] Peek successful for SSRC {}",
+                            track.ssrc()
+                        );
+                        pkt
+                    }
                     Err(err) => {
-                        log::warn!(
-                            "Could not determine PayloadType for SSRC {} ({})",
+                        log::error!( // Changed to error! for higher visibility
+                            "[PEER_CONNECTION_INTERNAL] Could not determine PayloadType for SSRC {} (peek failed: {})",
                             track.ssrc(),
                             err
                         );
@@ -1181,14 +1193,22 @@ impl PeerConnectionInternal {
                     }
                 };
 
+                log::info!(
+                    "[PEER_CONNECTION_INTERNAL] About to check_and_update_track for SSRC {}",
+                    track.ssrc()
+                );
                 if let Err(err) = track.check_and_update_track(&pkt).await {
-                    log::warn!(
-                        "Failed to set codec settings for track SSRC {} ({})",
+                    log::error!( // Changed to error! for higher visibility
+                        "[PEER_CONNECTION_INTERNAL] Failed to set codec settings for track SSRC {} ({})",
                         track.ssrc(),
                         err
                     );
                     return;
                 }
+                log::info!(
+                    "[PEER_CONNECTION_INTERNAL] check_and_update_track successful for SSRC {}. Calling do_track.",
+                    track.ssrc()
+                );
 
                 RTCPeerConnection::do_track(on_track_handler, track, receiver, transceiver);
             });

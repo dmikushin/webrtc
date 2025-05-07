@@ -7,7 +7,6 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use interceptor::stream_info::{AssociatedStreamInfo, RTPHeaderExtension};
 use interceptor::{Attributes, Interceptor};
-use log::trace;
 use smol_str::SmolStr;
 use tokio::sync::{watch, Mutex, RwLock};
 
@@ -258,60 +257,62 @@ impl RTPReceiverInternal {
         b: &mut [u8],
         tid: usize,
     ) -> Result<(rtp::packet::Packet, Attributes)> {
+        log::info!("[RTPReceiverInternal] read_rtp: called for tid: {}", tid);
         let mut state_watch_rx = self.state_tx.subscribe();
 
-        // Ensure we are running.
-        State::wait_for(&mut state_watch_rx, &[State::Started]).await?;
+        log::info!("[RTPReceiverInternal] read_rtp (tid: {}): waiting for Started state...", tid);
+        State::wait_for(&mut state_watch_rx, &[State::Started]).await.map_err(|e| {
+            log::error!("[RTPReceiverInternal] read_rtp (tid: {}): State::wait_for error: {:?}", tid, e);
+            e
+        })?;
+        log::info!("[RTPReceiverInternal] read_rtp (tid: {}): state is Started.", tid);
 
         //log::debug!("read_rtp enter tracks tid {}", tid);
         let mut rtp_interceptor = None;
         //let mut ssrc = 0;
         {
             let tracks = self.tracks.read().await;
+            log::info!("[RTPReceiverInternal] read_rtp (tid: {}): searching for track in {} tracks...", tid, tracks.len());
             for t in &*tracks {
                 if t.track.tid() == tid {
                     rtp_interceptor.clone_from(&t.stream.rtp_interceptor);
                     //ssrc = t.track.ssrc();
+                    log::info!("[RTPReceiverInternal] read_rtp (tid: {}): found track, rtp_interceptor is {}. SSRC: {}", tid, if rtp_interceptor.is_some() { "Some" } else { "None" }, t.track.ssrc());
                     break;
                 }
             }
         };
-        /*log::debug!(
-            "read_rtp exit tracks with rtp_interceptor {} with tid {}",
-            rtp_interceptor.is_some(),
-            tid,
-        );*/
 
         if let Some(rtp_interceptor) = rtp_interceptor {
             let a = Attributes::new();
-            //println!(
-            //    "read_rtp rtp_interceptor.read enter with tid {} ssrc {}",
-            //    tid, ssrc
-            //);
+            log::info!("[RTPReceiverInternal] read_rtp (tid: {}): entering select loop to read from rtp_interceptor...", tid);
             let mut current_state = *state_watch_rx.borrow();
             loop {
                 tokio::select! {
                     _ = state_watch_rx.changed() => {
                         let new_state = *state_watch_rx.borrow();
-
+                        log::info!("[RTPReceiverInternal] read_rtp (tid: {}): state changed from {} to {}", tid, current_state, new_state);
                         if new_state == State::Stopped {
+                            log::error!("[RTPReceiverInternal] read_rtp (tid: {}): state is Stopped, returning ErrClosedPipe", tid);
                             return Err(Error::ErrClosedPipe);
                         }
                         current_state = new_state;
                     }
                     result = rtp_interceptor.read(b, &a) => {
+                        log::info!("[RTPReceiverInternal] read_rtp (tid: {}): rtp_interceptor.read result: {:?}", tid, &result.as_ref().map(|(p, _)| (p.header.payload_type, p.header.sequence_number, p.header.ssrc)).map_err(|e| format!("{:?}", e)));
                         let result = result?;
 
                         if current_state == State::Paused {
-                            trace!("Dropping {} read bytes received while RTPReceiver was paused", result.0);
+                            log::warn!("[RTPReceiverInternal] read_rtp (tid: {}): Dropping {} read bytes received while RTPReceiver was paused", tid, result.0.payload.len());
                             continue;
                         }
+                        log::info!("[RTPReceiverInternal] read_rtp (tid: {}): returning packet (PT: {}, Seq: {}, SSRC: {})", tid, result.0.header.payload_type, result.0.header.sequence_number, result.0.header.ssrc);
                         return Ok(result);
                     }
                 }
             }
         } else {
-            //log::debug!("read_rtp exit tracks with ErrRTPReceiverWithSSRCTrackStreamNotFound");
+            log::error!("[RTPReceiverInternal] read_rtp (tid: {}): rtp_interceptor not found for track. Returning ErrRTPReceiverWithSSRCTrackStreamNotFound", tid);
             Err(Error::ErrRTPReceiverWithSSRCTrackStreamNotFound)
         }
     }
