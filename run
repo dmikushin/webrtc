@@ -128,7 +128,7 @@ def signal_handler(sig, frame):
 
 def main():
     parser = argparse.ArgumentParser(description="Run and manage the WebRTC pipeline.")
-    parser.add_argument("--timeout", type=int, default=15, help="Duration in seconds to run the processes before shutting them down. Default is 15 seconds.")
+    parser.add_argument("--timeout", type=int, default=30, help="Duration in seconds to run the processes before shutting them down. Default is 30 seconds.")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)
