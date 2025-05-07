@@ -125,43 +125,76 @@ async fn main() {
 
             // Set up on_track handler to log frame properties
             pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver: Arc<RTCRtpReceiver>, _transceiver: Arc<RTCRtpTransceiver>| {
-                info!("!!! ON_TRACK CALLED !!! Track kind: {}, ID: {}", track.kind(), track.id());
+                // Immediately print a prominent message when track is received
+                println!("\n**********************************************************");
+                println!("✅✅✅ TRACK RECEIVED: Video track detected from server");
+                println!("      Kind: {}, ID: {}, SSRC: {}", track.kind(), track.id(), track.ssrc());
+                println!("      Codec: {:?}", track.codec());
+                println!("**********************************************************\n");
                 
+                // Clone track for use in the async closure
                 let track_clone = Arc::clone(&track);
+                
+                // DEBUG: Add a thread to print periodic debug info
+                let track_debug = Arc::clone(&track);
+                std::thread::spawn(move || {
+                    println!("\n🔄 DEBUG: Started monitor thread for track ID: {}, SSRC: {}", track_debug.id(), track_debug.ssrc());
+                    let mut count = 0;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        count += 1;
+                        println!("🔄 DEBUG: Monitor heartbeat #{} for track ID: {}", count, track_debug.id());
+                        if count >= 20 {
+                            break;
+                        }
+                    }
+                });
+                
                 Box::pin(async move {
-                    info!("Starting to read frames from track ID: {}, SSRC: {}", track_clone.id(), track_clone.ssrc());
-                    info!("Codec details: {:?}", track_clone.codec());
+                    println!("\n🎬 Starting to read frames from track ID: {}, SSRC: {}", track_clone.id(), track_clone.ssrc());
+                    println!("   Codec details: {:?}", track_clone.codec());
                     
                     let mut frame_counter = 0;
                     
                     // Loop to read frames from the track
                     loop {
+                        println!("🔍 Waiting for frame... (attempt #{})", frame_counter + 1);
+                        
                         match track_clone.read_rtp().await {
                             Ok((rtp_packet, _)) => {
                                 frame_counter += 1;
-                                info!(
-                                    "FRAME #{}: SSRC={}, SeqNum={}, Timestamp={}, PayloadType={}, Payload size={} bytes",
-                                    frame_counter,
-                                    rtp_packet.header.ssrc,
-                                    rtp_packet.header.sequence_number,
-                                    rtp_packet.header.timestamp,
-                                    rtp_packet.header.payload_type,
-                                    rtp_packet.payload.len()
-                                );
                                 
-                                // For VP9, we could potentially log more details about the frame
-                                if frame_counter % 30 == 0 {
-                                    info!("Received {} frames so far on track {}", frame_counter, track_clone.id());
+                                // Print a clear, prominent message for confirmation
+                                println!("\n**********************************************************");
+                                println!("✅✅✅ DEFINITIVE CONFIRMATION: FRAME #{} RECEIVED!", frame_counter);
+                                println!("      SSRC={}, SeqNum={}, Timestamp={}", 
+                                       rtp_packet.header.ssrc,
+                                       rtp_packet.header.sequence_number,
+                                       rtp_packet.header.timestamp);
+                                println!("      Payload size={} bytes", rtp_packet.payload.len());
+                                println!("**********************************************************\n");
+                                
+                                // Special extra-noticeable message for first frame
+                                if frame_counter == 1 {
+                                    println!("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                                    println!("!!! SUCCESS! FIRST VIDEO FRAME RECEIVED FROM SERVER !!!");
+                                    println!("!!! This confirms WebRTC video streaming is working !!!");
+                                    println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+                                }
+                                
+                                // Log periodically after the first frame
+                                if frame_counter > 1 && frame_counter % 5 == 0 {
+                                    println!("\n✓ Received {} frames so far on track {}", frame_counter, track_clone.id());
                                 }
                             },
                             Err(e) => {
-                                log::error!("Error reading RTP packet from track {}: {}", track_clone.id(), e);
+                                println!("\n❌ ERROR: Failed to read RTP packet from track {}: {}", track_clone.id(), e);
                                 break;
                             }
                         }
                     }
                     
-                    info!("Exiting on_track loop for track {}, total frames received: {}", track_clone.id(), frame_counter);
+                    println!("\n🏁 Exiting on_track loop for track {}, total frames received: {}", track_clone.id(), frame_counter);
                 })
             }));
             info!("on_track handler set up with enhanced frame logging");
