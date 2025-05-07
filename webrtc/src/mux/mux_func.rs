@@ -44,12 +44,17 @@ pub fn match_srtp_or_srtcp(b: &[u8]) -> bool {
 
 pub(crate) fn is_rtcp(buf: &[u8]) -> bool {
     // Not long enough to determine RTP/RTCP
-    if buf.len() < 4 {
+    if buf.len() < 2 {
         return false;
     }
 
-    let rtcp_packet_type = buf[1];
-    (192..=223).contains(&rtcp_packet_type)
+    // RFC 5761 Section 4: Distinguishable RTP and RTCP Packets
+    // RTCP packets always have the RTP version field equal to 2, and the
+    // payload type field between 192 and 223 (inclusive)
+    let version = (buf[0] >> 6) & 0x03;  // Extract version from first two bits
+    let payload_type = buf[1] & 0x7F;    // Extract payload type
+    
+    version == 2 && (192..=223).contains(&payload_type)
 }
 
 /// match_srtp is a MatchFunc that only matches SRTP and not SRTCP
