@@ -34,13 +34,13 @@ EXECUTABLE_RUN_CONFIG = [
     {
         "id": "signalling-server",
         "type": "cmake",
-        "args": ["--verbose"],
+        "args": ["--verbose", "--port", "9080"],
         "prefix": "[signalling server] "
     },
     {
         "id": "vtk_cube", # Server
         "type": "cmake",
-        "args": ["--native", "--webrtc", "--verbose", "--signalling", "ws://localhost:8080"],
+        "args": ["--native", "--webrtc", "--verbose", "--signalling", "ws://localhost:9080"],
         "prefix": "[server] "
     },
     {
