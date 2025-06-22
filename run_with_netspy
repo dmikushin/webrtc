@@ -55,27 +55,25 @@ EXECUTABLE_RUN_CONFIG = [
 # Global list to keep track of Popen objects for cleanup
 processes_to_cleanup = []
 
-def run_build_command(command_list, step_name, cwd=None):
-    print(f"Running {step_name}: {' '.join(command_list)}")
+# NetSpy configuration - using CLI frontend now
+NETSPY_CMD = "netspy"
+
+def run_build_command(command_list, description, cwd=None):
     try:
+        print(f"{description}...")
         process = subprocess.run(command_list, check=True, capture_output=True, text=True, cwd=cwd)
-        # Print stdout/stderr for build steps as they can contain useful info/warnings
-        if process.stdout.strip():
-            print(f"--- {step_name} STDOUT ---\n{process.stdout.strip()}")
-        if process.stderr.strip():
-            print(f"--- {step_name} STDERR ---\n{process.stderr.strip()}") # CMake often uses stderr for progress
-        print(f"{step_name} successful.")
+        print(f"{description}: Completed successfully")
+        if process.stdout:
+            print(f"{description} stdout: {process.stdout}")
+        if process.stderr:
+            print(f"{description} stderr: {process.stderr}")
         return True
     except subprocess.CalledProcessError as e:
-        sys.stderr.write(f"{step_name} failed with error code {e.returncode}.\n")
-        if e.stdout.strip(): sys.stderr.write(f"Stdout:\n{e.stdout.strip()}\n")
-        if e.stderr.strip(): sys.stderr.write(f"Stderr:\n{e.stderr.strip()}\n")
-        return False
-    except FileNotFoundError:
-        sys.stderr.write(f"Error: Command '{command_list[0]}' not found for {step_name}. Is it installed and in PATH?\n")
-        return False
-    except Exception as e:
-        sys.stderr.write(f"An unexpected error occurred during {step_name}: {e}\n")
+        print(f"{description}: FAILED with exit code {e.returncode}")
+        if e.stdout:
+            print(f"{description} stdout: {e.stdout}")
+        if e.stderr:
+            print(f"{description} stderr: {e.stderr}")
         return False
 
 def read_and_prefix_output(process, prefix):
@@ -97,6 +95,7 @@ def read_and_prefix_output(process, prefix):
             sys.stderr.write(f"{prefix}Error reading output: {e}\n")
 
 def signal_handler(sig, frame):
+    """Signal handler for SIGINT and SIGTERM to clean up child processes."""
     sys.stderr.write("\nInterrupt or timeout received, terminating processes...\n") # Modified message
     for p in reversed(processes_to_cleanup):
         if p.poll() is None:
@@ -127,12 +126,23 @@ def signal_handler(sig, frame):
         sys.exit(0) # Exit cleanly if all terminated or were already done
 
 def main():
-    parser = argparse.ArgumentParser(description="Run and manage the WebRTC pipeline.")
+    parser = argparse.ArgumentParser(description="Run and manage the WebRTC pipeline with NetSpy network tracing.")
     parser.add_argument("--timeout", type=int, default=30, help="Duration in seconds to run the processes before shutting them down. Default is 30 seconds.")
+    parser.add_argument("--no-netspy", action="store_true", help="Run without NetSpy tracing")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # Check if NetSpy CLI is available (assuming it's installed separately)
+    if not args.no_netspy:
+        try:
+            subprocess.run([NETSPY_CMD, "--version"], check=True, capture_output=True)
+            print(f"NetSpy CLI found: {NETSPY_CMD}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"NetSpy CLI '{NETSPY_CMD}' not found in PATH")
+            print("NetSpy should be installed separately. Running without network tracing.")
+            args.no_netspy = True
 
     # 1. Perform Cargo build
     print("--- Starting Cargo Build Phase ---")
@@ -147,9 +157,6 @@ def main():
 
     # 2. Perform CMake builds
     print("\n--- Starting CMake Build Phase ---")
-    # os.makedirs(CMAKE_BUILD_DIR, exist_ok=True) # Top-level build dir created as needed by project subdirs
-
-    # Removed global CMake configure command that was here
 
     for project in CMAKE_PROJECTS_TO_BUILD:
         project_name = project['name']
@@ -191,49 +198,65 @@ def main():
             sys.exit(1)
         executable_paths[proj_spec["name"]] = path
     
-    for run_spec in EXECUTABLE_RUN_CONFIG:
-        if run_spec["type"] == "cargo_example":
-            cargo_example_name = run_spec["id"]
-            cargo_profile = run_spec["cargo_profile"]
-            # Cargo examples are typically in target/<profile>/examples/<example_name>
-            # For executables from workspace members (not examples), it would be target/<profile>/<name>
-            path_cargo = os.path.join("target", cargo_profile, "examples", cargo_example_name)
-            if not (os.path.exists(path_cargo) and os.access(path_cargo, os.X_OK)):
-                sys.stderr.write(f"Error: Cargo example executable '{path_cargo}' for '{cargo_example_name}' not found or not executable.\n")
-                sys.exit(1)
-            executable_paths[cargo_example_name] = path_cargo
-
+    # Prepare commands to run
     commands_to_run = []
     for run_spec in EXECUTABLE_RUN_CONFIG:
-        exec_id = run_spec["id"]
-        resolved_path = executable_paths.get(exec_id)
-        if not resolved_path:
-            sys.stderr.write(f"Error: Path for executable ID '{exec_id}' not resolved. Check EXECUTABLE_RUN_CONFIG setup.\n")
-            sys.exit(1)
-        
-        full_cmd = [os.path.abspath(resolved_path)] + run_spec["args"] # Use absolute path
-        commands_to_run.append({
-            "cmd": full_cmd,
-            "prefix": run_spec["prefix"],
-            "name": exec_id 
-        })
+        if run_spec["type"] == "cmake":
+            cmd = [executable_paths[run_spec["id"]]] + run_spec["args"]
+            commands_to_run.append({
+                "name": run_spec["id"],
+                "cmd": cmd,
+                "prefix": run_spec["prefix"]
+            })
+        elif run_spec["type"] == "cargo_example":
+            cargo_profile = run_spec["cargo_profile"]
+            example_name = run_spec["id"]
+            example_path = f"target/{cargo_profile}/examples/{example_name}"
+            
+            if not (os.path.exists(example_path) and os.access(example_path, os.X_OK)):
+                sys.stderr.write(f"Error: Cargo example executable '{example_path}' for '{example_name}' not found or not executable.\n")
+                sys.exit(1)
+            
+            cmd = [example_path] + run_spec["args"]
+            commands_to_run.append({
+                "name": run_spec["id"],
+                "cmd": cmd,
+                "prefix": run_spec["prefix"]
+            })
 
-    # 4. Run executables in parallel
-    threads = []
-    print("\n--- Starting executables in parallel ---")
-    timeout_occurred = False # Flag to indicate if timeout happened
-
+    # 4. Execute all processes
     try:
+        # Clear any existing PCAP files
+        if not args.no_netspy:
+            print("--- Clearing old PCAP files ---")
+            pcap_files = [f for f in os.listdir('.') if f.endswith('.pcap')]
+            for pcap_file in pcap_files:
+                os.remove(pcap_file)
+                print(f"Removed old PCAP file: {pcap_file}")
+
+        threads = []
+        print("\n--- Starting executables in parallel ---")
+        timeout_occurred = False # Flag to indicate if timeout happened
+
         for config in commands_to_run:
             print(f"Starting: {' '.join(config['cmd'])}")
-            # Ensure the executable exists and is executable right before running
+            
+            # Double-check the executable still exists with correct permissions before Popen
             if not (os.path.exists(config['cmd'][0]) and os.access(config['cmd'][0], os.X_OK)):
                  sys.stderr.write(f"Critical Error: Executable {config['cmd'][0]} for {config['name']} disappeared or lost permissions before execution.\n")
                  signal_handler(None, None) # Attempt to clean up anything already started
                  sys.exit(1)
 
+            # Prepare command with NetSpy
+            if not args.no_netspy:
+                # Wrap command with netspy CLI
+                final_cmd = [NETSPY_CMD, "--output", ".", "--filter", "WebRTC|RTP|UDP|TCP"] + config["cmd"]
+                print(f"NetSpy tracing enabled for {config['name']}")
+            else:
+                final_cmd = config["cmd"]
+
             process = subprocess.Popen(
-                config["cmd"],
+                final_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -247,6 +270,9 @@ def main():
             thread.start()
         
         print(f"\n--- Processes running. Waiting for timeout ({args.timeout}s) or manual interruption ---")
+        if not args.no_netspy:
+            print("--- Network traffic will be captured in PCAP files ---")
+            
         # Wait for the specified timeout
         # We'll loop with a short sleep to allow SIGINT to be processed promptly
         for _ in range(args.timeout):
@@ -266,6 +292,18 @@ def main():
             thread.join()
 
         print("\n--- All processes finished or were terminated ---") # Modified message
+        
+        # List generated PCAP files
+        if not args.no_netspy:
+            print("\n--- NetSpy Network Traces Generated ---")
+            pcap_files = [f for f in os.listdir('.') if f.endswith('.pcap')]
+            if pcap_files:
+                for pcap_file in pcap_files:
+                    size = os.path.getsize(pcap_file)
+                    print(f"PCAP file: {pcap_file} (size: {size} bytes)")
+                print(f"\nTo analyze network traffic, use: wireshark <pcap_file>")
+            else:
+                print("No PCAP files were generated")
         
         all_successful = True
         for i, p in enumerate(processes_to_cleanup):
@@ -288,12 +326,12 @@ def main():
             sys.exit(0) # Exit cleanly after a timeout
 
     except FileNotFoundError as e: 
-        sys.stderr.write(f"Error: An executable was not found during launch: {e.filename}. This should have been caught earlier.\n")
-        signal_handler(None, None) 
+        sys.stderr.write(f"FileNotFoundError during execution: {e}\n")
+        signal_handler(None, None) # Try to clean up any processes already started
         sys.exit(1)
     except Exception as e:
-        sys.stderr.write(f"An unexpected error occurred during parallel execution: {e}\n")
-        signal_handler(None, None)
+        sys.stderr.write(f"Unexpected error during execution: {e}\n")
+        signal_handler(None, None) # Try to clean up any processes already started
         sys.exit(1)
 
 if __name__ == "__main__":

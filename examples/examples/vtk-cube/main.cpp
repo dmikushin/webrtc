@@ -106,7 +106,7 @@ int main(int argc, char* argv[])
     bool webrtc_output = false;
     bool verbose = false;
     int width = 640, height = 480;
-    std::string signalling_url = "ws://localhost:8080";
+    std::string signalling_url = "ws://localhost:8888";
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--native") native_output = true;
@@ -357,7 +357,8 @@ int main(int argc, char* argv[])
         });
     }
 
-    if (native_output) {
+    if (native_output && !webrtc_output) {
+        // Native-only mode: interactive VTK window
         // Attach observers to mark scene as dirty on interaction
         struct DirtyData {
             std::atomic<bool>* scene_dirty;
@@ -384,8 +385,8 @@ int main(int argc, char* argv[])
         running = false;
         dirty_cv.notify_one();
     } else if (webrtc_output) {
-        // If only webrtc output, keep main thread alive until interrupted
-        std::cout << "Press Ctrl+C to exit..." << std::endl;
+        // WebRTC mode (with or without native): keep main thread alive for signaling
+        if (verbose) std::cout << "WebRTC mode active, waiting for signaling..." << std::endl;
         while (running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }

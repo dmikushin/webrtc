@@ -35,7 +35,7 @@ async fn main() {
     info!("vtk-cube-client-console: starting up"); // Changed to info!
 
     // Connect to signaling server (replace with actual URL if needed)
-    let signaling_url = "ws://127.0.0.1:9080";
+    let signaling_url = "ws://127.0.0.1:8888";
     let url = Url::parse(signaling_url).expect("Invalid signaling server URL");
     match connect_async(url).await {
         Ok((mut ws_stream, _)) => {

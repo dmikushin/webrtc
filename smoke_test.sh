@@ -14,8 +14,8 @@ echo "🧪 Running WebRTC Pipeline Smoke Test..."
 rm -f smoke_test.log
 
 # Run the pipeline 
-echo "⏳ Building and running pipeline..."
-./run --timeout 20 > smoke_test.log 2>&1 || true
+echo "⏳ Building and running pipeline (debug mode for faster compilation)..."
+./run --timeout 15 > smoke_test.log 2>&1 || true
 
 echo "📊 Test Results:"
 
@@ -47,7 +47,7 @@ else
 fi
 
 # Test 4: Check signaling server startup
-if grep -q "Signaling server listening on ws://localhost:9080" smoke_test.log; then
+if grep -q "Signaling server listening on ws://localhost:8888" smoke_test.log; then
     echo "✅ Signaling Server: PASS"
     SIGNALING_PASS=true
 else
